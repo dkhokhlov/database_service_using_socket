@@ -1,8 +1,7 @@
 import socket
 import time
-
-HOST = "127.0.0.1"  # Standard loopback interface address (localhost)
-PORT = 65432  # Port to listen on (non-privileged ports are > 1023)
+import argparse
+import constants as const
 
 
 def serve():
@@ -14,9 +13,18 @@ def serve():
     """
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        print(f"Listening on {HOST}:{PORT}")
-        s.bind((HOST, PORT))
-        s.listen()
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 10)
+        # Linux specific
+        assert (hasattr(socket, "TCP_KEEPIDLE") and hasattr(socket, "TCP_KEEPINTVL") and hasattr(socket, "TCP_KEEPCNT"))
+        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, const.TCP_KEEPIDLE_SEC)
+        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, const.TCP_KEEPINTVL_SEC)
+        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, const.TCP_KEEPCNT_SEC)
+
+        print(f"Listening on {const.HOST}:{const.PORT}")
+
+        s.bind((const.HOST, const.PORT))
+        s.listen(const.BACKLOG)
 
         while True:
             conn, addr = s.accept()
@@ -48,6 +56,8 @@ def delay():
 
 
 def main():
+    parser = argparse.ArgumentParser(description="PII microservice")
+    parser.parse_args()
     serve()
 
 
