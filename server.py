@@ -1,10 +1,11 @@
 import socket
 import time
 import argparse
+import asyncio
 import constants as const
 
 
-def serve():
+async def serve():
     """
     Note: you should implement http methods by hand, using a socket server
     as below (or similar to below).
@@ -14,7 +15,8 @@ def serve():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 10)
+        # enable TCP socket keep-alive
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         # Linux specific
         assert (hasattr(socket, "TCP_KEEPIDLE") and hasattr(socket, "TCP_KEEPINTVL") and hasattr(socket, "TCP_KEEPCNT"))
         s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, const.TCP_KEEPIDLE_SEC)
@@ -25,30 +27,35 @@ def serve():
 
         s.bind((const.HOST, const.PORT))
         s.listen(const.BACKLOG)
-
+        s.setblocking(False)
+        loop = asyncio.get_event_loop()
         while True:
-            conn, addr = s.accept()
-            with conn:
-                print("Connected by", addr)
-                while True:
-                    data = conn.recv(2048)  # assume all requests are smaller than 2048 bytes
-                    raw = data.decode("utf-8")
-                    lines = raw.split("\r\n")
-                    request = "  \n".join(lines)
-                    print(f"Request: \n{request}")
+            conn, addr = await loop.sock_accept(s)
+            loop.create_task(handle_connection(conn, addr))
 
-                    method, path, version = lines[0].split(" ")
-                    if path == "/ping":
-                        delay()
-                        response = "HTTP/1.1 200 Ok\n\n"
-                    else:
-                        response = "xxx"
 
-                    delay()
+async def handle_connection(conn, addr):
+    with conn:
+        print("Connected by", addr)
+        while True:
+            data = conn.recv(2048)  # assume all requests are smaller than 2048 bytes
+            raw = data.decode("utf-8")
+            lines = raw.split("\r\n")
+            request = "  \n".join(lines)
+            print(f"Request: \n{request}")
 
-                    print(f"Response: \n{response}")
-                    conn.sendall(response.encode("utf-8"))
-                    break
+            method, path, version = lines[0].split(" ")
+            if path == "/ping":
+                delay()
+                response = "HTTP/1.1 200 Ok\n\n"
+            else:
+                response = "xxx"
+
+            delay()
+
+            print(f"Response: \n{response}")
+            conn.sendall(response.encode("utf-8"))
+            break
 
 
 def delay():
@@ -58,7 +65,7 @@ def delay():
 def main():
     parser = argparse.ArgumentParser(description="PII microservice")
     parser.parse_args()
-    serve()
+    asyncio.run(serve())
 
 
 if __name__ == "__main__":
