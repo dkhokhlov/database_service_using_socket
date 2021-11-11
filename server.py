@@ -4,7 +4,7 @@ import asyncio
 import signal
 import urllib.parse
 import traceback
-import database
+from database import Database
 
 import constants as const
 
@@ -14,7 +14,7 @@ class Context:
     Service scope context object
     """
 
-    def __init__(self, loop, db_ro: database.Database, db_rw_pool: asyncio.Queue, rate_limit_buckets):
+    def __init__(self, loop, db_ro: Database, db_rw_pool: asyncio.Queue, rate_limit_buckets):
         self.db_ro = db_ro
         self.db_rw_pool = db_rw_pool
         self.loop = loop
@@ -30,11 +30,11 @@ async def serve(loop):
                                                interval_sec=const.RATE_LIMIT_SEC,
                                                limit=const.RATE_LIMIT_NUM))
     # create ro db used by GETs
-    db_ro = database.Database(loop, const.DB_RO_URI)
+    db_ro = Database(loop, const.DB_RO_URI)
     # rw db pool used by mutable methods, unbound grow with low limited shrink
     db_rw_pool = asyncio.Queue()  # unbound on get, but manually limited to const.db_rw_pool_SIZE on put
     for i in range(10):  # pre-fill few initially
-        await db_rw_pool.put(database.Database(loop, const.DB_RW_URI))
+        await db_rw_pool.put(Database(loop, const.DB_RW_URI))
     context = Context(loop, db_ro, db_rw_pool, rate_limit_buckets)
     # setup ipv4 TCP socket server
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -87,24 +87,24 @@ async def handle_connection(conn_sock, addr, context: Context) -> None:
                 if tokens > 0:
                     rate_limit_buckets[addr[0]] = tokens - 1
                 else:
-                    response = compose_response(429)  # Too many requests
-                    await loop.sock_sendall(conn_sock, response)
+                    # Too many requests
+                    await loop.sock_sendall(conn_sock, RESPONSE_429)
                     return
                 # get first line
                 lines = request.split("\n")
                 method, req_path, version = lines[0].split(" ")
                 # basic checks
                 if method not in {"GET", "PUT", "PATCH", "DELETE"}:
-                    response = compose_response(400), False  # Bad Request
-                    await loop.sock_sendall(conn_sock, response)
+                    # Bad Request
+                    await loop.sock_sendall(conn_sock, RESPONSE_400)
                     break  # close connection
                 if version == "HTTP/1.0":
-                    response = compose_response(505), False  # HTTP Version not supported
-                    await loop.sock_sendall(conn_sock, response)
+                    # HTTP Version not supported
+                    await loop.sock_sendall(conn_sock, RESPONSE_505)
                     break  # close connection
-                if "content-length:" in request.lower():  # content in requests is not supported
-                    response = compose_response(400), False  # Bad Request
-                    await loop.sock_sendall(conn_sock, response)
+                if "content-length:" in request.lower():
+                    # Bad Request, content in requests is not supported
+                    await loop.sock_sendall(conn_sock, RESPONSE_400)
                     break  # close connection
                 # check and switch to RW db if needed
                 if method != "GET" and current_db is context.db_ro:
@@ -141,7 +141,7 @@ def compose_response(status: int, json: str = '') -> bytes:
     return response
 
 
-async def process_request(method: str, req_path: str, db: database.Database) -> tuple:
+async def process_request(method: str, req_path: str, db: Database) -> tuple:
     """
     :return: tuple (bytes, bool) - (response, keep connection open)
     """
@@ -149,12 +149,83 @@ async def process_request(method: str, req_path: str, db: database.Database) -> 
     query = urllib.parse.parse_qs(url.query)
     path = url.path
     if path == "/ping":
-        await delay()
-        response = compose_response(200), True  # OK
+        return await handle_ping(method, query)
     elif path == "/db/begin":
-        response = b'', True
+        return await handle_db_begin(method, db)
+    elif path == "/db/commit":
+        return await handle_db_commit(method, db)
+    elif path == "/db/rollback":
+        return await handle_db_rollback(method, db)
+    elif path == "/pii/search":
+        return await handle_pii_search(method, query, db)
+    elif path == "/pii/insert":
+        return await handle_pii_insert(method, query, db)
+    elif path == "/pii/update":
+        return await handle_pii_update(method, query, db)
+    elif path == "/pii/delete":
+        return await handle_pii_delete(method, query, db)
     else:
-        response = compose_response(404), False  # Not Found
+        response = RESPONSE_404, False  # Not Found
+    return response
+
+
+async def handle_ping(method: str, query: dict) -> tuple:
+    if method != "GET":
+        return RESPONSE_400, False  # Bad Request
+    await asyncio.sleep(1)
+    response = RESPONSE_200, True  # OK
+    return response
+
+
+async def handle_db_begin(method: str, db: Database) -> tuple:
+    if method != "PUT":
+        return RESPONSE_400, False  # Bad Request
+    await db.execute("BEGIN")
+    response = RESPONSE_200, True  # OK
+    return response
+
+
+async def handle_db_commit(method: str, db: Database) -> tuple:
+    if method != "PUT":
+        return RESPONSE_400, False  # Bad Request
+    await db.execute("COMMIT")
+    response = RESPONSE_200, True  # OK
+    return response
+
+
+async def handle_db_rollback(method: str, db: Database) -> tuple:
+    if method != "PUT":
+        return RESPONSE_400, False  # Bad Request
+    await db.execute("ROLLBACK")
+    response = RESPONSE_200, True  # OK
+    return response
+
+
+async def handle_pii_search(method: str, query: dict, db: Database) -> tuple:
+    if method != "GET":
+        return RESPONSE_400, False  # Bad Request
+    response = RESPONSE_200, True  # OK
+    return response
+
+
+async def handle_pii_insert(method: str, query: dict, db: Database) -> tuple:
+    if method != "PUT":
+        return RESPONSE_400, False  # Bad Request
+    response = RESPONSE_200, True  # OK
+    return response
+
+
+async def handle_pii_update(method: str, query: dict, db: Database) -> tuple:
+    if method != "PATCH":
+        return RESPONSE_400, False  # Bad Request
+    response = RESPONSE_200, True  # OK
+    return response
+
+
+async def handle_pii_delete(method: str, query: dict, db: Database) -> tuple:
+    if method != "DELETE":
+        return RESPONSE_400, False  # Bad Request
+    response = RESPONSE_200, True  # OK
     return response
 
 
@@ -162,11 +233,7 @@ async def refill_rate_limit_buckets(buckets: dict, interval_sec: int, limit: int
     while True:
         await asyncio.sleep(interval_sec)
         for key in buckets.keys():
-            buckets[key] = limit  # TODO: shrinking based on last activity time, extract
-
-
-async def delay():
-    await asyncio.sleep(1)
+            buckets[key] = limit  # TODO: shrink buckets based on last activity time, extract into class/func
 
 
 def shutdown():
@@ -191,6 +258,12 @@ def main():
         loop.close()
     print("Finished")
 
+
+RESPONSE_200 = compose_response(200)
+RESPONSE_400 = compose_response(400)
+RESPONSE_404 = compose_response(404)
+RESPONSE_429 = compose_response(429)
+RESPONSE_505 = compose_response(505)
 
 if __name__ == "__main__":
     main()
