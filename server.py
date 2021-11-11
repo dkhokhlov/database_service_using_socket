@@ -4,25 +4,37 @@ import asyncio
 import signal
 import sqlite3
 import urllib.parse
+import traceback
 
 import constants as const
 
 
+class Context:
+    def __init__(self, loop, db_ro, db_pool, rate_limit_buckets):
+        self.db_ro = db_ro
+        self.db_pool = asyncio.Queue()
+        self.loop = loop
+        self.rate_limit_buckets = rate_limit_buckets
+
+
 async def serve(loop):
     """
-    Note: you should implement http methods by hand, using a socket server
-    as below (or similar to below).
-
-    Do not use an http server from the python standard library.
     """
     rate_limit_buckets = {}
     loop.create_task(refill_rate_limit_buckets(rate_limit_buckets, const.RATE_LIMIT_NUM, const.RATE_LIMIT_SEC))
+    # create ro db for GETs
+    db_ro = sqlite3.connect(const.DB_RO_URI, uri=True)
+    db_ro.executescript("PRAGMA journal_mode=WAL")
+    # rw db pool for mutable methods, will grow as we go
+    db_pool = asyncio.Queue()  # unbound on get, but manually limited on put by const.DB_POOL_SIZE
+    context = Context(loop, db_ro, db_pool, rate_limit_buckets)
+    # setup ipv4 TCP socket server
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         # enable TCP socket keep-alive
         s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-        # Linux specific
+        # Linux specific socket options
         assert (hasattr(socket, "TCP_KEEPIDLE") and hasattr(socket, "TCP_KEEPINTVL") and hasattr(socket, "TCP_KEEPCNT"))
         s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, const.TCP_KEEPIDLE_SEC)
         s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, const.TCP_KEEPINTVL_SEC)
@@ -38,7 +50,7 @@ async def serve(loop):
             conn, addr = await loop.sock_accept(s)
             print("Connected by", addr)
             conn.setblocking(False)
-            loop.create_task(handle_connection(conn, addr, rate_limit_buckets, loop))
+            loop.create_task(handle_connection(conn, addr, context))
 
 
 def compose_response(status: int, json: str = '') -> bytes:
@@ -57,6 +69,9 @@ def compose_response(status: int, json: str = '') -> bytes:
 async def process_request(request: str) -> bytes:
     lines = request.split("\n")
     method, req_path, version = lines[0].split(" ")
+    if method not in {"GET", "PUT", "PATCH", "DELETE"}:
+        response = compose_response(400)  # Bad Request
+        return response
     url = urllib.parse.urlparse(req_path)
     query = urllib.parse.parse_qs(url.query)
     path = url.path
@@ -78,21 +93,22 @@ async def refill_rate_limit_buckets(buckets: dict, interval_sec: int, limit: int
     while True:
         await asyncio.sleep(interval_sec)
         for key in buckets.keys():
-            buckets[key] = limit
+            buckets[key] = limit  # TODO: shrinking based on last activity time, extract
 
 
-async def handle_connection(conn_sock, addr, rate_limit_buckets: dict, loop) -> None:
+async def handle_connection(conn_sock, addr, context: Context) -> None:
     print(f"handle_connection {addr}: begin")
+    rate_limit_buckets = context.rate_limit_buckets
+    loop = context.loop
     with conn_sock:
-        tokens = rate_limit_buckets.get(addr[0], const.RATE_LIMIT_NUM)
-        if tokens > 0:
-            rate_limit_buckets[addr[0]] = tokens - 1
-        else:
-            response = compose_response(429)  # Too many requests
-            await loop.sock_sendall(conn_sock, response)
-            return
-        db = sqlite3.connect(const.DB_URI, uri=True)
-        with db:
+        try:
+            tokens = rate_limit_buckets.get(addr[0], const.RATE_LIMIT_NUM)
+            if tokens > 0:
+                rate_limit_buckets[addr[0]] = tokens - 1
+            else:
+                response = compose_response(429)  # Too many requests
+                await loop.sock_sendall(conn_sock, response)
+                return
             buffer = ''
             while True:
                 data = await loop.sock_recv(conn_sock, 2048)  # assume all requests are smaller than 2048 bytes
@@ -110,7 +126,9 @@ async def handle_connection(conn_sock, addr, rate_limit_buckets: dict, loop) -> 
                 response = await process_request(request)
                 print(f"Response: \n{response.decode('utf-8')}")
                 await loop.sock_sendall(conn_sock, response)
-        print(f"handle_connection {addr}: closed")
+        except Exception:
+            print(traceback.format_exc())
+    print(f"handle_connection {addr}: closed")
 
 
 async def delay():
