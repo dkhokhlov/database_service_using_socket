@@ -65,26 +65,30 @@ def compose_response(status: int, json: str = '') -> bytes:
     return response
 
 
-async def process_request(request: str) -> bytes:
+async def process_request(request: str) -> tuple:
+    """
+    :param request:
+    :return: tuple (bytes, bool) - response, keep connection open
+    """
     lines = request.split("\n")
     method, req_path, version = lines[0].split(" ")
     if method not in {"GET", "PUT", "PATCH", "DELETE"}:
-        response = compose_response(400)  # Bad Request
+        response = compose_response(400), False  # Bad Request
         return response
     url = urllib.parse.urlparse(req_path)
     query = urllib.parse.parse_qs(url.query)
     path = url.path
     if version == "HTTP/1.0":
-        response = compose_response(505)  # HTTP Version not supported
-        return response
+        response = compose_response(505), False  # HTTP Version not supported
+        return response,
     if "content-length:" in request.lower():
-        response = compose_response(400)  # Bad Request
+        response = compose_response(400), False  # Bad Request
         return response
     if path == "/ping":
         await delay()
-        response = compose_response(200)  # OK
+        response = compose_response(200), True  # OK
     else:
-        response = compose_response(404)  # Not Found
+        response = compose_response(404), False  # Not Found
     return response
 
 
@@ -116,15 +120,19 @@ async def handle_connection(conn_sock, addr, context: Context) -> None:
                 data_str = data.decode("utf-8")
                 data_str = data_str.replace("\r", "")
                 buffer += data_str
-                end_of_header = buffer.find('\n\n')
+                end_of_header = buffer.find('\n\n')  # we support HTTP 1.1 pipelining
                 if end_of_header < 0:
                     continue
                 request = buffer[:end_of_header]
                 buffer = buffer[end_of_header + 2:]
                 print(f"Request: \n{request}\n\n")
-                response = await process_request(request)
+                # process request
+                response, keep_open = await process_request(request)
                 print(f"Response: \n{response.decode('utf-8')}")
+                # send response
                 await loop.sock_sendall(conn_sock, response)
+                if not keep_open:
+                    break
         except Exception:
             print(traceback.format_exc())
     print(f"handle_connection {addr}: closed")
