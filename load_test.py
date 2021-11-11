@@ -2,9 +2,10 @@ from http import client
 import asyncio
 import constants
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 
-async def ping(index: int) -> int:
+def ping(index: int) -> int:
     print(f"{index}: ping")
     c = client.HTTPConnection(constants.HOST, constants.PORT)
     c.request("GET", "/ping")
@@ -14,12 +15,13 @@ async def ping(index: int) -> int:
 
 
 async def load_test(num_tasks: int):
+    executor = ThreadPoolExecutor(num_tasks)
     start = time.time()
-    tasks = [asyncio.create_task(ping(i)) for i in range(num_tasks)]
-    await asyncio.gather(*tasks)
-    elapsed = time.time() - start
+    tasks = [executor.submit(ping, i) for i in range(num_tasks)]
 
     results = [task.result() for task in tasks]
+    elapsed = time.time() - start
+
     print(f"Results: {results}, ")
 
     assert elapsed < (
