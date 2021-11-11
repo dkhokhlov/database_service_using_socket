@@ -14,7 +14,7 @@ TCP_KEEPCNT_SEC = 1
 DB_FILE = '/dev/shm/pii_service.db'  # needs to be copied to nonvolatile storage after service shutdown
 DB_RW_URI = f'file:{DB_FILE}?cache=shared&mode=ro'
 DB_RO_URI = f'file:{DB_FILE}?cache=shared'
-DB_POOL_SIZE = 100000
+DB_RW_POOL_SIZE = 10000
 
 # Rate limiter
 RATE_LIMIT_SEC = 1

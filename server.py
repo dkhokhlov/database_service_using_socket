@@ -2,17 +2,17 @@ import socket
 import argparse
 import asyncio
 import signal
-import sqlite3
 import urllib.parse
 import traceback
+import database
 
 import constants as const
 
 
 class Context:
-    def __init__(self, loop, db_ro, db_pool, rate_limit_buckets):
+    def __init__(self, loop, db_ro, db_rw_pool, rate_limit_buckets):
         self.db_ro = db_ro
-        self.db_pool = asyncio.Queue()
+        self.db_rw_pool = asyncio.Queue()
         self.loop = loop
         self.rate_limit_buckets = rate_limit_buckets
 
@@ -22,12 +22,11 @@ async def serve(loop):
     """
     rate_limit_buckets = {}
     loop.create_task(refill_rate_limit_buckets(rate_limit_buckets, const.RATE_LIMIT_NUM, const.RATE_LIMIT_SEC))
-    # create ro db for GETs
-    db_ro = sqlite3.connect(const.DB_RO_URI, uri=True)
-    db_ro.executescript("PRAGMA journal_mode=WAL")
-    # rw db pool for mutable methods, will grow as we go
-    db_pool = asyncio.Queue()  # unbound on get, but manually limited on put by const.DB_POOL_SIZE
-    context = Context(loop, db_ro, db_pool, rate_limit_buckets)
+    # create ro db used by GETs
+    db_ro = database.Database(loop, const.DB_RO_URI)
+    # rw db pool used by mutable methods, unbound grow with low limited shrink
+    db_rw_pool = asyncio.Queue()  # unbound on get, but manually limited to const.db_rw_pool_SIZE on put
+    context = Context(loop, db_ro, db_rw_pool, rate_limit_buckets)
     # setup ipv4 TCP socket server
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
