@@ -7,3 +7,11 @@ BACKLOG = 30 # accept backlog
 TCP_KEEPIDLE_SEC = 10
 TCP_KEEPINTVL_SEC = 10
 TCP_KEEPCNT_SEC = 1
+
+# Database
+DB_URI = 'file::memory:?cache=shared'
+
+# Rate limiter
+RATE_LIMIT_SEC = 1
+RATE_LIMIT_NUM = 5
+

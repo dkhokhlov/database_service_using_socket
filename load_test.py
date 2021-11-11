@@ -2,6 +2,7 @@ from http import client
 import asyncio
 import constants
 import time
+import argparse
 from concurrent.futures import ThreadPoolExecutor
 
 
@@ -30,7 +31,10 @@ async def load_test(num_tasks: int):
 
 
 def main():
-    asyncio.run(load_test(3))
+    parser = argparse.ArgumentParser(description="PII microservice load test")
+    parser.add_argument("--num", default=3, type=int, help="Number of concurrent requests")
+    args = parser.parse_args()
+    asyncio.run(load_test(args.num))
 
 
 if __name__ == "__main__":
