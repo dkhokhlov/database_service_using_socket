@@ -106,6 +106,9 @@ async def handle_connection(conn_sock, addr, context: Context) -> None:
                     response = compose_response(400), False  # Bad Request
                     await loop.sock_sendall(conn_sock, response)
                     break  # close connection
+                # check and switch to RW db if needed
+                if method != "GET" and current_db is context.db_ro:
+                    current_db = await context.db_rw_pool.get()
                 # process request
                 response, keep_open = await process_request(method, req_path, current_db)
                 print(f"Response: \n{response.decode('utf-8')}")
@@ -114,11 +117,14 @@ async def handle_connection(conn_sock, addr, context: Context) -> None:
                 if not keep_open:
                     break  # close connection
             # connection is closed, do rollback if needed
-            if await current_db.in_transaction():
-                await current_db.execute("ROLLBACK")
+            if not current_db is context.db_ro:
+                if await current_db.in_transaction():
+                    await current_db.execute("ROLLBACK")
         except Exception:
             print(traceback.format_exc())
-
+    # return rw db back to pull or just discard it if pool is big enough
+    if not current_db is context.db_ro and context.db_rw_pool.qsize() < const.DB_RW_POOL_SIZE:
+        await context.db_rw_pool.put(current_db)
     print(f"handle_connection {addr}: closed")
 
 
