@@ -14,7 +14,7 @@ class Context:
     Service scope context object
     """
 
-    def __init__(self, loop, db_ro, db_rw_pool, rate_limit_buckets):
+    def __init__(self, loop, db_ro: database.Database, db_rw_pool: asyncio.Queue, rate_limit_buckets):
         self.db_ro = db_ro
         self.db_rw_pool = db_rw_pool
         self.loop = loop
@@ -26,7 +26,9 @@ async def serve(loop):
     """
     rate_limit_buckets = {}
     # start rate_limit_buckets periodic refills
-    loop.create_task(refill_rate_limit_buckets(rate_limit_buckets, const.RATE_LIMIT_NUM, const.RATE_LIMIT_SEC))
+    loop.create_task(refill_rate_limit_buckets(rate_limit_buckets,
+                                               interval_sec=const.RATE_LIMIT_SEC,
+                                               limit=const.RATE_LIMIT_NUM))
     # create ro db used by GETs
     db_ro = database.Database(loop, const.DB_RO_URI)
     # rw db pool used by mutable methods, unbound grow with low limited shrink
@@ -59,63 +61,13 @@ async def serve(loop):
             loop.create_task(handle_connection(conn, addr, context))
 
 
-def compose_response(status: int, json: str = '') -> bytes:
-    content = json.encode("utf-8")
-    length = len(content)
-    header = f'HTTP/1.1 {status}\n'
-    header += 'Connection: keep-alive\n'
-    if json:
-        header += 'Content-Type: application/json; charset=utf-8\n'
-        header += 'Cache-control: no-cache, no-store, must-revalidate\n'
-    header += f'Content-Length: {length}\n\n'
-    response = header.encode("utf-8") + content
-    return response
-
-
-class Connection:
-    def __init__(self):
-        conn
-
-
-async def process_request(db: database.Database, method: str, req_path: str) -> tuple:
-    """
-    :param request:
-    :return: tuple (bytes, bool) - response, keep connection open
-    """
-    url = urllib.parse.urlparse(req_path)
-    query = urllib.parse.parse_qs(url.query)
-    path = url.path
-    if path == "/ping":
-        await delay()
-        response = compose_response(200), True  # OK
-    if path == "/db/begin":
-        response = b'', True
-    else:
-        response = compose_response(404), False  # Not Found
-    return response
-
-
-async def refill_rate_limit_buckets(buckets: dict, interval_sec: int, limit: int) -> None:
-    while True:
-        await asyncio.sleep(interval_sec)
-        for key in buckets.keys():
-            buckets[key] = limit  # TODO: shrinking based on last activity time, extract
-
-
 async def handle_connection(conn_sock, addr, context: Context) -> None:
     print(f"handle_connection {addr}: begin")
     rate_limit_buckets = context.rate_limit_buckets
     loop = context.loop
-    current_db = context.db_ro # start with RO then switch RW as needed
+    current_db = context.db_ro  # start with RO then switch RW as needed
     with conn_sock:
         try:
-            tokens = rate_limit_buckets.get(addr[0], const.RATE_LIMIT_NUM)
-            if tokens > 0:
-                rate_limit_buckets[addr[0]] = tokens - 1
-            else:
-                response = compose_response(429)  # Too many requests
-                await loop.sock_sendall(conn_sock, response)
-                return
             buffer = ''
             while True:
                 data = await loop.sock_recv(conn_sock, 2048)
@@ -130,9 +82,18 @@ async def handle_connection(conn_sock, addr, context: Context) -> None:
                 request = buffer[:end_of_header]
                 buffer = buffer[end_of_header + 2:]
                 print(f"Request: \n{request}\n\n")
+                # reta limiter
+                tokens = rate_limit_buckets.get(addr[0], const.RATE_LIMIT_NUM)
+                if tokens > 0:
+                    rate_limit_buckets[addr[0]] = tokens - 1
+                else:
+                    response = compose_response(429)  # Too many requests
+                    await loop.sock_sendall(conn_sock, response)
+                    return
+                # get first line
                 lines = request.split("\n")
                 method, req_path, version = lines[0].split(" ")
-                # validate request
+                # basic checks
                 if method not in {"GET", "PUT", "PATCH", "DELETE"}:
                     response = compose_response(400), False  # Bad Request
                     await loop.sock_sendall(conn_sock, response)
@@ -141,20 +102,61 @@ async def handle_connection(conn_sock, addr, context: Context) -> None:
                     response = compose_response(505), False  # HTTP Version not supported
                     await loop.sock_sendall(conn_sock, response)
                     break  # close connection
-                if "content-length:" in request.lower():
+                if "content-length:" in request.lower():  # content in requests is not supported
                     response = compose_response(400), False  # Bad Request
                     await loop.sock_sendall(conn_sock, response)
                     break  # close connection
                 # process request
-                response, keep_open = await process_request(current_db, method, req_path)
+                response, keep_open = await process_request(method, req_path, current_db)
                 print(f"Response: \n{response.decode('utf-8')}")
                 # send response
                 await loop.sock_sendall(conn_sock, response)
                 if not keep_open:
                     break  # close connection
+            # connection is closed, do rollback if needed
+            if await current_db.in_transaction():
+                await current_db.execute("ROLLBACK")
         except Exception:
             print(traceback.format_exc())
+
     print(f"handle_connection {addr}: closed")
+
+
+def compose_response(status: int, json: str = '') -> bytes:
+    content = json.encode("utf-8")
+    length = len(content)
+    header = f'HTTP/1.1 {status}\n'
+    header += 'Connection: keep-alive\n'
+    if json:
+        header += 'Content-Type: application/json; charset=utf-8\n'
+        header += 'Cache-control: no-cache, no-store, must-revalidate\n'
+    header += f'Content-Length: {length}\n\n'
+    response = header.encode("utf-8") + content
+    return response
+
+
+async def process_request(method: str, req_path: str, db: database.Database) -> tuple:
+    """
+    :return: tuple (bytes, bool) - (response, keep connection open)
+    """
+    url = urllib.parse.urlparse(req_path)
+    query = urllib.parse.parse_qs(url.query)
+    path = url.path
+    if path == "/ping":
+        await delay()
+        response = compose_response(200), True  # OK
+    elif path == "/db/begin":
+        response = b'', True
+    else:
+        response = compose_response(404), False  # Not Found
+    return response
+
+
+async def refill_rate_limit_buckets(buckets: dict, interval_sec: int, limit: int) -> None:
+    while True:
+        await asyncio.sleep(interval_sec)
+        for key in buckets.keys():
+            buckets[key] = limit  # TODO: shrinking based on last activity time, extract
 
 
 async def delay():

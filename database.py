@@ -10,12 +10,13 @@ class Database:
         self.loop = loop
         self.executor = concurrent.futures.ProcessPoolExecutor(max_workers=1,
                                                                initializer=self.connect_database,
-                                                               initargs=(uri))
+                                                               initargs=(uri,))
         # self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1,
         #                                                       initializer=self.connect_database,
-        #                                                       initargs=(uri))
+        #                                                       initargs=(uri,))
 
-    def connect_database(self, uri) -> None:
+    @staticmethod
+    def connect_database(uri) -> None:
         db = sqlite3.connect(database=uri, uri=True, isolation_level=None)  # with autocommit
         db.executescript("PRAGMA journal_mode=WAL")  # better reads & writes concurrency
         current_thread = threading.current_thread()
@@ -27,10 +28,24 @@ class Database:
         current_thread = threading.current_thread()
         local_storage = current_thread.__dict__
         db: sqlite3.Cursor = local_storage['db']
-        cur = db.execute(sql, params)
+        if params:
+            cur = db.execute(sql, params)
+        else:
+            cur = db.execute(sql)
         result = cur.fetchall()
         return result
 
     async def execute(self, sql: str, params = None):
         result = await self.loop.run_in_executor(self.executor, self._execute, sql, params)
+        return result
+
+    @staticmethod
+    def _in_transaction():
+        current_thread = threading.current_thread()
+        local_storage = current_thread.__dict__
+        db: sqlite3.Cursor = local_storage['db']
+        return db.connection.in_transaction
+
+    async def in_transaction(self):
+        result = await self.loop.run_in_executor(self.executor, self._in_transaction)
         return result
