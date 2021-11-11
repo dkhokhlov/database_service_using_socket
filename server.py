@@ -10,9 +10,13 @@ import constants as const
 
 
 class Context:
+    """
+    Service scope context object
+    """
+
     def __init__(self, loop, db_ro, db_rw_pool, rate_limit_buckets):
         self.db_ro = db_ro
-        self.db_rw_pool = asyncio.Queue()
+        self.db_rw_pool = db_rw_pool
         self.loop = loop
         self.rate_limit_buckets = rate_limit_buckets
 
@@ -21,11 +25,14 @@ async def serve(loop):
     """
     """
     rate_limit_buckets = {}
+    # start rate_limit_buckets periodic refills
     loop.create_task(refill_rate_limit_buckets(rate_limit_buckets, const.RATE_LIMIT_NUM, const.RATE_LIMIT_SEC))
     # create ro db used by GETs
     db_ro = database.Database(loop, const.DB_RO_URI)
     # rw db pool used by mutable methods, unbound grow with low limited shrink
     db_rw_pool = asyncio.Queue()  # unbound on get, but manually limited to const.db_rw_pool_SIZE on put
+    for i in range(10):  # pre-fill few initially
+        await db_rw_pool.put(database.Database(loop, const.DB_RW_URI))
     context = Context(loop, db_ro, db_rw_pool, rate_limit_buckets)
     # setup ipv4 TCP socket server
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -65,28 +72,24 @@ def compose_response(status: int, json: str = '') -> bytes:
     return response
 
 
-async def process_request(request: str) -> tuple:
+class Connection:
+    def __init__(self):
+        conn
+
+
+async def process_request(db: database.Database, method: str, req_path: str) -> tuple:
     """
     :param request:
     :return: tuple (bytes, bool) - response, keep connection open
     """
-    lines = request.split("\n")
-    method, req_path, version = lines[0].split(" ")
-    if method not in {"GET", "PUT", "PATCH", "DELETE"}:
-        response = compose_response(400), False  # Bad Request
-        return response
     url = urllib.parse.urlparse(req_path)
     query = urllib.parse.parse_qs(url.query)
     path = url.path
-    if version == "HTTP/1.0":
-        response = compose_response(505), False  # HTTP Version not supported
-        return response,
-    if "content-length:" in request.lower():
-        response = compose_response(400), False  # Bad Request
-        return response
     if path == "/ping":
         await delay()
         response = compose_response(200), True  # OK
+    if path == "/db/begin":
+        response = b'', True
     else:
         response = compose_response(404), False  # Not Found
     return response
@@ -103,6 +106,7 @@ async def handle_connection(conn_sock, addr, context: Context) -> None:
     print(f"handle_connection {addr}: begin")
     rate_limit_buckets = context.rate_limit_buckets
     loop = context.loop
+    current_db = context.db_ro # start with RO then switch RW as needed
     with conn_sock:
         try:
             tokens = rate_limit_buckets.get(addr[0], const.RATE_LIMIT_NUM)
@@ -114,7 +118,7 @@ async def handle_connection(conn_sock, addr, context: Context) -> None:
                 return
             buffer = ''
             while True:
-                data = await loop.sock_recv(conn_sock, 2048)  # assume all requests are smaller than 2048 bytes
+                data = await loop.sock_recv(conn_sock, 2048)
                 if data == b'':
                     break  # connection closed
                 data_str = data.decode("utf-8")
@@ -126,13 +130,28 @@ async def handle_connection(conn_sock, addr, context: Context) -> None:
                 request = buffer[:end_of_header]
                 buffer = buffer[end_of_header + 2:]
                 print(f"Request: \n{request}\n\n")
+                lines = request.split("\n")
+                method, req_path, version = lines[0].split(" ")
+                # validate request
+                if method not in {"GET", "PUT", "PATCH", "DELETE"}:
+                    response = compose_response(400), False  # Bad Request
+                    await loop.sock_sendall(conn_sock, response)
+                    break  # close connection
+                if version == "HTTP/1.0":
+                    response = compose_response(505), False  # HTTP Version not supported
+                    await loop.sock_sendall(conn_sock, response)
+                    break  # close connection
+                if "content-length:" in request.lower():
+                    response = compose_response(400), False  # Bad Request
+                    await loop.sock_sendall(conn_sock, response)
+                    break  # close connection
                 # process request
-                response, keep_open = await process_request(request)
+                response, keep_open = await process_request(current_db, method, req_path)
                 print(f"Response: \n{response.decode('utf-8')}")
                 # send response
                 await loop.sock_sendall(conn_sock, response)
                 if not keep_open:
-                    break
+                    break  # close connection
         except Exception:
             print(traceback.format_exc())
     print(f"handle_connection {addr}: closed")
