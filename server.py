@@ -5,6 +5,9 @@ import signal
 import json
 import urllib.parse
 import traceback
+import hashlib
+from collections import OrderedDict
+
 from database import Database
 import constants as const
 
@@ -93,7 +96,7 @@ async def handle_connection(conn_sock, addr, context: Context) -> None:
                     rate_limit_buckets[addr[0]] = tokens - 1
                 else:
                     # Too many requests
-                    await loop.sock_sendall(conn_sock, RESPONSE_429)
+                    await loop.sock_sendall(conn_sock, RESPONSE_429) # Too many requests sent
                     return
                 # get first line
                 lines = request.split("\n")
@@ -154,7 +157,7 @@ async def process_request(method: str, req_path: str, db: Database) -> tuple:
     :return: tuple (bytes, bool) - (response, keep connection open)
     """
     url = urllib.parse.urlparse(req_path)
-    query = urllib.parse.parse_qs(url.query)
+    query = dict((k, v[0] if isinstance(v, list) else v) for k, v in urllib.parse.parse_qs(url.query).items())
     path = url.path
     try:
         if path == "/ping":
@@ -176,8 +179,8 @@ async def process_request(method: str, req_path: str, db: Database) -> tuple:
         else:
             response = RESPONSE_404, False  # Not Found
     except Exception as ex:
-        resp_json = json.dumps({"Error" : str(ex)}, indent=4) + '\n'
-        response = compose_response(500, resp_json), False
+        result_json = json.dumps({"Error": str(ex)}, indent=4)
+        response = compose_response(500, result_json + '\n'), False
     return response
 
 
@@ -216,14 +219,46 @@ async def handle_db_rollback(method: str, db: Database) -> tuple:
 async def handle_pii_search(method: str, query: dict, db: Database) -> tuple:
     if method != "GET":
         return RESPONSE_400, False  # Bad Request
+
+
+
+
     response = RESPONSE_200, True  # OK
     return response
+
+
+def encode_SSN(ssn: str) -> str:
+    return hashlib.blake2b(ssn.encode('utf8'), salt=const.HMAC_SALT).hexdigest()
 
 
 async def handle_pii_insert(method: str, query: dict, db: Database) -> tuple:
     if method != "PUT":
         return RESPONSE_400, False  # Bad Request
-    response = RESPONSE_200, True  # OK
+    query_keys = set(query.keys())
+    fields = ", ".join(const.DB_PII_TABLE_FIELDS)
+    if set(const.DB_PII_TABLE_FIELDS) != set(query_keys):
+        result_json = json.dumps({"Error": f"Invalid list of fields {query_keys}." +
+                                           f"Expected: {const.DB_PII_TABLE_FIELDS}"}, indent=4)
+        response = compose_response(400, result_json + '\n'), True  # OK
+        return response
+    values = ":" + ", :".join(const.DB_PII_TABLE_FIELDS)
+    sql = f"""
+    INSERT INTO  pii_table ({fields})
+    VALUES ({values})
+    RETURNING {fields};         
+    """
+    # encode SSN
+    if "SSN" in query_keys:
+        query['SSN'] = encode_SSN(query['SSN'])
+    result = await db.execute(sql, query)
+    new_result = []
+    for i, rec in enumerate(result):
+        new_rec = OrderedDict()
+        for k, v in zip(const.DB_PII_TABLE_FIELDS, rec):
+            new_rec[k] = v
+        new_result.append(new_rec)
+    result_json = json.dumps(new_result, indent=4)
+    response = compose_response(200, result_json + '\n'), True  # OK
     return response
 
 
@@ -271,12 +306,12 @@ def main():
     print("Finished")
 
 
-RESPONSE_200 = compose_response(200)
-RESPONSE_400 = compose_response(400)
-RESPONSE_404 = compose_response(404)
-RESPONSE_429 = compose_response(429)
-RESPONSE_505 = compose_response(505)
-RESPONSE_500 = compose_response(500)
+RESPONSE_200 = compose_response(200)  # OK
+RESPONSE_400 = compose_response(400)  # Bad Request
+RESPONSE_404 = compose_response(404)  # Not Found
+RESPONSE_429 = compose_response(429)  # Too many requests sent
+RESPONSE_505 = compose_response(505)  # HTTP Version Not Supported
+RESPONSE_500 = compose_response(500)  # Internal Server Error
 
 if __name__ == "__main__":
     main()

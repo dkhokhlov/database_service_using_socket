@@ -30,8 +30,12 @@ CREATE TABLE IF NOT EXISTS  pii_table(
 );
 """
 
+DB_PII_TABLE_FIELDS = ["first_name", "last_name", "occupation", "SSN", "DOB"]
+
 # Rate limiter
 RATE_LIMIT_SEC = 1
 RATE_LIMIT_NUM = 5
 
+# salt
+HMAC_SALT = b'34795863497'
 
