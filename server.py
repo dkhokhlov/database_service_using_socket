@@ -16,6 +16,7 @@ __version__ = '1.0'
 
 g_shutdown = 0
 
+
 class Context:
     """
     Service scope context object
@@ -224,7 +225,7 @@ async def handle_db_rollback(method: str, db: Database) -> tuple:
 
 ############################  pii path handlers
 
-def validate_query(query: dict) -> tuple:
+def validate_query(query: dict, include_new=False, check_pkey=False) -> tuple:
     """
     :return: empty - means all valid
     """
@@ -239,12 +240,26 @@ def validate_query(query: dict) -> tuple:
     if "DOB" in query_keys and not utils.is_date(query["DOB"]):
         result_json = json.dumps({"Error": f"Invalid DOB: '{query['DOB']}'"})
         return utils.compose_response(400, result_json + '\n'), False  # Err
-    # validate field set in query
-    if not set(query_keys).issubset(set(const.DB_PII_TABLE_FIELDS)):
+    # validate fields are from allowed set
+    allowed_keys = set(const.DB_PII_TABLE_FIELDS)
+    if include_new:
+        new_allowed_keys = set()
+        for k in allowed_keys:
+            new_allowed_keys.add(k + '_new')
+            new_allowed_keys.add(k)
+        allowed_keys = new_allowed_keys
+    if not set(query_keys).issubset(allowed_keys):
         diff_set = set(const.DB_PII_TABLE_FIELDS) - set(query_keys)
         result_json = json.dumps({"Error": f"Unknown fields {diff_set}." +
                                            f"Allowed: {const.DB_PII_TABLE_FIELDS}"}, indent=4)
         return utils.compose_response(400, result_json + '\n'), False  # Err
+    if check_pkey:
+        # check that fields are matching rimary kay fields
+        if not set(const.DB_PII_TABLE_PKEY).issubset(set(query.keys())):
+            diff_set = set(const.DB_PII_TABLE_PKEY) - set(query.keys())
+            result_json = json.dumps({"Error": f"Missing fields {diff_set}." +
+                                               f"Required: {const.DB_PII_TABLE_PKEY}"}, indent=4)
+            return utils.compose_response(400, result_json + '\n'), False  # Err
     return ()
 
 
@@ -294,31 +309,27 @@ async def handle_pii_insert(method: str, query: dict, db: Database) -> tuple:
 
 
 async def handle_pii_update(method: str, query: dict, db: Database) -> tuple:
+    """
+    values to be updated are provided with "_new" name suffix:
+        field1=value1&field1_new=value2
+    """
     if method != "PATCH":
         return utils.RESPONSE_400, False  # Bad Request
     # validate query fields & vals
-    reponse_tuple = validate_query(query)
+    reponse_tuple = validate_query(query, include_new=True, check_pkey=True)
     if reponse_tuple:
         return reponse_tuple
     # extract fields that need to be updated
     query_new = dict()
     query_old = dict()
     for k, v in query.items():
-        if isinstance(v, list) and len(v) == 1:
-            query_old[k] = v[0]
-        elif isinstance(v, list) and len(v) == 2:
-            query_old[k] = v[0]
-            query_new[k + '_new'] = v[1]
-        elif not isinstance(v, list):
-            query_old[k] = v
+        if k.endswith("_new"):
+            query_new[k] = v
         else:
-            result_json = json.dumps({"Error": f"Invalid value format: '{k}={v}'"})
-            return utils.compose_response(400, result_json + '\n'), False  # Err
-    # check that fields are matching rimary kay fields
-    if not set(const.DB_PII_TABLE_PKEY).issubset(set(query.keys())):
-        diff_set = set(const.DB_PII_TABLE_PKEY) - set(query.keys())
-        result_json = json.dumps({"Error": f"Missing fields {diff_set}." +
-                                           f"Required: {const.DB_PII_TABLE_PKEY}"}, indent=4)
+            query_old[k] = v
+    # check for non empty query_new
+    if not query_new:
+        result_json = json.dumps({"Error": f"Missing new values"}, indent=4)
         return utils.compose_response(400, result_json + '\n'), False  # Err
     # compose sql stmt
     fields = ", ".join(const.DB_PII_TABLE_FIELDS)
@@ -341,15 +352,9 @@ async def handle_pii_delete(method: str, query: dict, db: Database) -> tuple:
     if method != "DELETE":
         return utils.RESPONSE_400, False  # Bad Request
     # validate query fields & vals
-    reponse_tuple = validate_query(query)
+    reponse_tuple = validate_query(query, check_pkey=True)
     if reponse_tuple:
         return reponse_tuple
-    # check that fields are matching rimary kay fields
-    if not set(const.DB_PII_TABLE_PKEY).issubset(set(query.keys())):
-        diff_set = set(const.DB_PII_TABLE_PKEY) - set(query.keys())
-        result_json = json.dumps({"Error": f"Missing fields {diff_set}." +
-                                           f"Required: {const.DB_PII_TABLE_PKEY}"}, indent=4)
-        return utils.compose_response(400, result_json + '\n'), False  # Err
     # compose sql stmt
     query_keys = set(query.keys())
     where_clause = ' AND '.join([f"{k} = :{k}" for k in query_keys])
