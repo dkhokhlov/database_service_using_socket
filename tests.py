@@ -46,9 +46,12 @@ def test(
         if "SSN" in expect_fields.keys():
             expect_fields['SSN'] = utils.encode_SSN(expect_fields['SSN'])
         json_obj = json.loads(response_body)
-        for k in expect_fields.keys():
-            assert (json_obj[0][k] == expect_fields[k])
-
+        if expect_fields:
+            for k in expect_fields.keys():
+                assert (json_obj[0][k] == expect_fields[k])
+        else:
+            if expect_fields is not None:
+                assert (len(json_obj) == 0)
     print(f"Success({name})!\n")
 
 
@@ -86,7 +89,7 @@ def test_single_delete_no_fields():
         json_str = f.read()
         query = json.loads(json_str)
         query_url = urllib.parse.urlencode(query)
-        test("DeleteTest", path=f"/pii/delete?{query_url}", method="DELETE", expect_body=True,
+        test("DeleteTest no fields", path=f"/pii/delete?{query_url}", method="DELETE", expect_body=True,
              expected_response=200)
 
 
@@ -148,7 +151,7 @@ def test_single_rollback():
 
 @catch
 def test_single_update_with_rollback():
-    print("UpdateTest")
+    print("UpdateTest_with_rollback")
     with open("data/pb.json", "r") as f:
         json_str = f.read()
         query = json.loads(json_str)
@@ -158,30 +161,30 @@ def test_single_update_with_rollback():
         query_expected["first_name"] = "Bill2"
         query_expected2 = query_expected.copy()
         query_url = urllib.parse.urlencode(query_expected)
-        # now reusing connection
+        # now updating with reusing connection and begin + rollback
         c = client.HTTPConnection(constants.HOST, constants.PORT)  # need to reuse connection
-        test("DeleteTest", path=f"/pii/delete?{query_url}", method="DELETE",
+        test("UpdateTest_with_rollback1", path=f"/pii/delete?{query_url}", method="DELETE",
              expected_response=200, expect_body=True, connection=c)
         time.sleep(0.5)
-        test("RollbackTest3", path=f"/db/begin", method="PUT",
+        test("UpdateTest_with_rollback2", path=f"/db/begin", method="PUT",
              expected_response=200, expect_body=False, expect_fields=None, connection=c)
         query_url = urllib.parse.urlencode(query_new)
         time.sleep(0.5)
-        test("RollbackTest4", path=f"/pii/update?{query_url}", method="PATCH",
+        test("UpdateTest_with_rollback2", path=f"/pii/update?{query_url}", method="PATCH",
              expected_response=200, expect_body=True, expect_fields=query_expected, connection=c)
-        test("RollbackTest5", path=f"/db/rollback", method="PUT",
+        test("UpdateTest_with_rollback3", path=f"/db/rollback", method="PUT",
              expected_response=200, expect_body=False, expect_fields=None, connection=c)
         # now we run new session with update only - it should not see last update (no PKEY violation)
         time.sleep(0.5)
         query_url = urllib.parse.urlencode(query_expected2)
         test("RollbackTest6", path=f"/pii/search?{query_url}", method="GET",
-             expected_response=200, expect_body=True, expect_fields=query_expected2)
+             expected_response=200, expect_body=True, expect_fields={})
 
 def main():
     tests = [
         test_ping,
         test_single_delete_no_fields,
-        test_delay,
+        test_delay,# to avoid rate limiter
         test_single_insert,
         test_single_delete,
         test_delay,  # to avoid rate limiter
