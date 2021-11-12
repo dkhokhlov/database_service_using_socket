@@ -6,8 +6,8 @@ import json
 import urllib.parse
 import traceback
 import hashlib
+import datetime as dt
 from collections import OrderedDict
-
 from database import Database
 import constants as const
 
@@ -96,7 +96,7 @@ async def handle_connection(conn_sock, addr, context: Context) -> None:
                     rate_limit_buckets[addr[0]] = tokens - 1
                 else:
                     # Too many requests
-                    await loop.sock_sendall(conn_sock, RESPONSE_429) # Too many requests sent
+                    await loop.sock_sendall(conn_sock, RESPONSE_429)  # Too many requests sent
                     return
                 # get first line
                 lines = request.split("\n")
@@ -216,14 +216,48 @@ async def handle_db_rollback(method: str, db: Database) -> tuple:
     return response
 
 
+def is_date(date_str: str) -> bool:
+    try:
+        t = dt.datetime.strptime(date_str, '"%m-%d-%Y')
+        return True
+    except ValueError:
+        return False
+
+
 async def handle_pii_search(method: str, query: dict, db: Database) -> tuple:
     if method != "GET":
         return RESPONSE_400, False  # Bad Request
-
-
-
-
-    response = RESPONSE_200, True  # OK
+    query_keys = set(query.keys())
+    # encode SSN
+    if "SSN" in query_keys:
+        query['SSN'] = encode_SSN(query['SSN'])
+    if "DOB" in query_keys and not is_date(query["DOB"]):
+        result_json = json.dumps({"Error": f"Invalid date '{query['DOB']}'"})
+        response = compose_response(400, result_json + '\n'), True  # Err
+        return response
+    fields = ", ".join(const.DB_PII_TABLE_FIELDS)
+    if not set(query_keys).issubset(set(const.DB_PII_TABLE_FIELDS)):
+        diff_set = set(const.DB_PII_TABLE_FIELDS) - set(query_keys)
+        result_json = json.dumps({"Error": f"Unknown fields {diff_set}." +
+                                           f"Allowed: {const.DB_PII_TABLE_FIELDS}"}, indent=4)
+        response = compose_response(400, result_json + '\n'), True  # Err
+        return response
+    values = ":" + ", :".join(query_keys)
+    where_clause = ' AND '.join([f"{k} = :{k}" for k in query_keys])
+    sql = f"""
+    SELECT {fields}
+    FROM pii_table
+    WHERE {where_clause};         
+    """
+    result = await db.execute(sql, query)
+    new_result = []
+    for i, rec in enumerate(result):
+        new_rec = OrderedDict()
+        for k, v in zip(const.DB_PII_TABLE_FIELDS, rec):
+            new_rec[k] = v
+        new_result.append(new_rec)
+    result_json = json.dumps(new_result, indent=4)
+    response = compose_response(200, result_json + '\n'), True  # OK
     return response
 
 
