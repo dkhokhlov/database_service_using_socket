@@ -1,6 +1,7 @@
 import sqlite3
 import concurrent.futures
 import threading
+import asyncio
 
 assert (sqlite3.sqlite_version_info > (3, 3))
 
@@ -72,5 +73,8 @@ class Database:
 
     async def close(self):
         result = await self.loop.run_in_executor(self.executor, self._close)
+        self.executor.shutdown()
         return result
 
+    def shutdown(self):
+        self.executor()

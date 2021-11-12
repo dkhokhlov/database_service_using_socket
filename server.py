@@ -2,9 +2,11 @@ import socket
 import argparse
 import asyncio
 import signal
+import functools
 import json
 import urllib.parse
 import traceback
+import time
 from database import Database
 import constants as const
 import utils
@@ -12,15 +14,19 @@ import utils
 APP_NAME = 'pii-service'
 __version__ = '1.0'
 
+g_shutdown = 0
 
 class Context:
     """
     Service scope context object
     """
 
-    def __init__(self, loop, db_ro: Database, db_rw_pool: asyncio.Queue, rate_limit_buckets):
+    def __init__(self, loop, server_socket, db_ro: Database, db_rw_set_active: set, db_rw_set_idle: set,
+                 rate_limit_buckets):
+        self.server_socket = server_socket
         self.db_ro = db_ro
-        self.db_rw_pool = db_rw_pool
+        self.db_rw_set_active = db_rw_set_active
+        self.db_rw_set_idle = db_rw_set_idle
         self.loop = loop
         self.rate_limit_buckets = rate_limit_buckets
 
@@ -35,15 +41,15 @@ async def serve(loop):
                                                limit=const.RATE_LIMIT_NUM))
     # create ro db used by GETs
     db_ro = Database(loop, const.DB_RO_URI)
-    # rw db pool used by mutable methods, unbound with low limited shrink
-    db_rw_pool = asyncio.Queue()  # unbound on get, but manually limited to const.DB_RW_POOL_SIZE on put
+    # rw db pools used by mutable methods
+    db_rw_set_idle = set()
+    db_rw_set_active = set()
     for i in range(10):  # pre-fill few initially
-        await db_rw_pool.put(Database(loop, const.DB_RW_URI))
+        db_rw_set_idle.add(Database(loop, const.DB_RW_URI))
     # run DB DDL script
-    db = await db_rw_pool.get()
+    db = db_rw_set_idle.pop()
     await db.executescript(const.DB_DDL_SQL)  # create table if missing etc
-    await db_rw_pool.put(db)  # put db back to pool
-    context = Context(loop, db_ro, db_rw_pool, rate_limit_buckets)
+    db_rw_set_idle.add(db)  # put db back to pool
     # setup ipv4 TCP socket server
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -60,6 +66,9 @@ async def serve(loop):
         s.bind((const.HOST, const.PORT))
         s.listen(const.TCP_LISTEN_BACKLOG)
         s.setblocking(False)
+        # start shutdown watchdog - will close server socket and pools
+        context = Context(loop, s, db_ro, db_rw_set_active, db_rw_set_idle, rate_limit_buckets)
+        loop.create_task(shutdown_watchdog(context, 0.2))
         while True:
             conn, addr = await loop.sock_accept(s)
             print("Connected by", addr)
@@ -118,7 +127,11 @@ async def handle_connection(conn_sock, addr, context: Context) -> None:
                     break  # close connection
                 # check and switch to RW db if needed
                 if method != "GET" and current_db is context.db_ro:
-                    current_db = await context.db_rw_pool.get()
+                    if len(context.db_rw_set_idle):
+                        current_db = context.db_rw_set_idle.pop()
+                    else:
+                        current_db = Database(loop, const.DB_RW_URI)
+                context.db_rw_set_active.add(current_db)
                 # process request
                 response, keep_open = await process_request(method, req_path, current_db)
                 print(f"Response: \n{response.decode('utf-8')}")
@@ -134,9 +147,10 @@ async def handle_connection(conn_sock, addr, context: Context) -> None:
             if current_db is not context.db_ro:
                 if await current_db.in_transaction():
                     await current_db.execute("ROLLBACK")
-    # return rw db back to pull or just discard it if pool is big enough
-    if current_db is not context.db_ro and context.db_rw_pool.qsize() < const.DB_RW_POOL_SIZE:
-        await context.db_rw_pool.put(current_db)
+    # return rw db back to idle pool or just discard it if it is already big enough
+    if current_db is not context.db_ro and len(context.db_rw_set_idle) < const.DB_RW_POOL_SIZE:
+        context.db_rw_set_idle.add(current_db)
+    context.db_rw_set_active.discard(current_db)
     conn_sock.close()
     print(f"handle_connection {addr}: closed")
 
@@ -146,7 +160,8 @@ async def process_request(method: str, req_path: str, db: Database) -> tuple:
     :return: tuple (bytes, bool) - (response, keep connection open)
     """
     url = urllib.parse.urlparse(req_path)
-    query = dict((k, (v[0] if isinstance(v, list) and len(v) == 1 else v)) for k, v in urllib.parse.parse_qs(url.query).items())
+    query = dict(
+        (k, (v[0] if isinstance(v, list) and len(v) == 1 else v)) for k, v in urllib.parse.parse_qs(url.query).items())
     path = url.path
     try:
         if path == "/ping":
@@ -360,8 +375,24 @@ async def refill_rate_limit_buckets(buckets: dict, interval_sec: int, limit: int
             buckets[key] = limit  # TODO: shrink buckets based on last activity time, extract into class/func
 
 
+async def shutdown_watchdog(ctx: Context, interval_sec: float):
+    while True:
+        await asyncio.sleep(interval_sec)
+        global g_shutdown
+        if g_shutdown:
+            ctx.server_socket.close()
+            for db in ctx.db_rw_set_idle:
+                db.shutdown()
+            for db in ctx.db_rw_set_active:
+                db.shutdown()
+            break
+
+
 def shutdown():
     print('Got a SIGINT!')
+    global g_shutdown
+    g_shutdown = True
+    time.sleep(1)
     tasks = asyncio.all_tasks()
     print(f'Cancelling {len(tasks)} task(s).')
     [task.cancel() for task in tasks]
@@ -373,8 +404,9 @@ def main():
     parser.parse_args()
     #
     loop = asyncio.get_event_loop()
-    loop.set_debug(True)
-    loop.add_signal_handler(signal.SIGINT, shutdown)
+    # loop.set_debug(True)
+    loop.add_signal_handler(signal.SIGHUP, functools.partial(shutdown, loop))
+    loop.add_signal_handler(signal.SIGTERM, functools.partial(shutdown, loop))
     #
     try:
         loop.create_task(serve(loop))
@@ -382,6 +414,7 @@ def main():
     finally:
         loop.close()
     print("Finished")
+
 
 if __name__ == "__main__":
     main()
