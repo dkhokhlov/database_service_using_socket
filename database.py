@@ -40,6 +40,19 @@ class Database:
         return result
 
     @staticmethod
+    def _executescript(sql: str):
+        current_thread = threading.current_thread()
+        local_storage = current_thread.__dict__
+        db: sqlite3.Cursor = local_storage['db']
+        cur = db.executescript(sql)
+        result = cur.fetchall()
+        return result
+
+    async def executescript(self, sql: str):
+        result = await self.loop.run_in_executor(self.executor, self._executescript, sql)
+        return result
+
+    @staticmethod
     def _in_transaction():
         current_thread = threading.current_thread()
         local_storage = current_thread.__dict__
@@ -49,3 +62,15 @@ class Database:
     async def in_transaction(self):
         result = await self.loop.run_in_executor(self.executor, self._in_transaction)
         return result
+
+    @staticmethod
+    def _close():
+        current_thread = threading.current_thread()
+        local_storage = current_thread.__dict__
+        db: sqlite3.Cursor = local_storage['db']
+        return db.connection.close()
+
+    async def close(self):
+        result = await self.loop.run_in_executor(self.executor, self._close)
+        return result
+

@@ -5,8 +5,10 @@ import signal
 import urllib.parse
 import traceback
 from database import Database
-
 import constants as const
+
+APP_NAME = 'pii-service'
+__version__ = '1.0'
 
 
 class Context:
@@ -35,6 +37,10 @@ async def serve(loop):
     db_rw_pool = asyncio.Queue()  # unbound on get, but manually limited to const.db_rw_pool_SIZE on put
     for i in range(10):  # pre-fill few initially
         await db_rw_pool.put(Database(loop, const.DB_RW_URI))
+    # run DB DDL script
+    db = await db_rw_pool.get()
+    await db.executescript(const.DB_DDL_SQL)  # create table if missing etc
+    await db_rw_pool.put(db) # put db back to pool
     context = Context(loop, db_ro, db_rw_pool, rate_limit_buckets)
     # setup ipv4 TCP socket server
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -51,9 +57,8 @@ async def serve(loop):
         print(f"Listening on {const.HOST}:{const.PORT}")
 
         s.bind((const.HOST, const.PORT))
-        s.listen(const.BACKLOG)
+        s.listen(const.TCP_LISTEN_BACKLOG)
         s.setblocking(False)
-
         while True:
             conn, addr = await loop.sock_accept(s)
             print("Connected by", addr)
@@ -70,7 +75,7 @@ async def handle_connection(conn_sock, addr, context: Context) -> None:
         try:
             buffer = ''
             while True:
-                data = await loop.sock_recv(conn_sock, 2048)
+                data = await loop.sock_recv(conn_sock, const.HTTP_BUFFER_SIZE)
                 if data == b'':
                     break  # connection closed
                 data_str = data.decode("utf-8")
@@ -244,7 +249,7 @@ def shutdown():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="PII microservice")
+    parser = argparse.ArgumentParser(description=f"{APP_NAME} v{__version__}")
     parser.parse_args()
     #
     loop = asyncio.get_event_loop()
