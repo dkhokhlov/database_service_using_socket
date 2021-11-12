@@ -56,5 +56,6 @@ RESPONSE_200 = compose_response(200)  # OK
 RESPONSE_400 = compose_response(400)  # Bad Request
 RESPONSE_404 = compose_response(404)  # Not Found
 RESPONSE_429 = compose_response(429)  # Too many requests sent
-RESPONSE_505 = compose_response(505)  # HTTP Version Not Supported
 RESPONSE_500 = compose_response(500)  # Internal Server Error
+RESPONSE_503 = compose_response(503)  # Busy
+RESPONSE_505 = compose_response(505)  # HTTP Version Not Supported

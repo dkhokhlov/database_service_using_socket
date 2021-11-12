@@ -35,8 +35,8 @@ async def serve(loop):
                                                limit=const.RATE_LIMIT_NUM))
     # create ro db used by GETs
     db_ro = Database(loop, const.DB_RO_URI)
-    # rw db pool used by mutable methods, unbound grow with low limited shrink
-    db_rw_pool = asyncio.Queue()  # unbound on get, but manually limited to const.db_rw_pool_SIZE on put
+    # rw db pool used by mutable methods, unbound with low limited shrink
+    db_rw_pool = asyncio.Queue()  # unbound on get, but manually limited to const.DB_RW_POOL_SIZE on put
     for i in range(10):  # pre-fill few initially
         await db_rw_pool.put(Database(loop, const.DB_RW_URI))
     # run DB DDL script
@@ -95,6 +95,11 @@ async def handle_connection(conn_sock, addr, context: Context) -> None:
                 else:
                     # Too many requests
                     await loop.sock_sendall(conn_sock, utils.RESPONSE_429)  # Too many requests sent
+                    return
+                # check connections limit
+                print(len(asyncio.all_tasks(loop)))
+                if len(asyncio.all_tasks(loop)) - 2 > const.HTTP_CONNECT_MAX:
+                    await loop.sock_sendall(conn_sock, utils.RESPONSE_503)  # Too many connections
                     return
                 # get first line
                 lines = request.split("\n")
