@@ -128,11 +128,11 @@ async def handle_connection(conn_sock, addr, context: Context) -> None:
         finally:
             conn_sock.shutdown(socket.SHUT_RDWR)
             # connection is getting closed, do rollback if needed
-            if not current_db is context.db_ro:
+            if current_db is not context.db_ro:
                 if await current_db.in_transaction():
                     await current_db.execute("ROLLBACK")
     # return rw db back to pull or just discard it if pool is big enough
-    if not current_db is context.db_ro and context.db_rw_pool.qsize() < const.DB_RW_POOL_SIZE:
+    if current_db is not context.db_ro and context.db_rw_pool.qsize() < const.DB_RW_POOL_SIZE:
         await context.db_rw_pool.put(current_db)
     conn_sock.close()
     print(f"handle_connection {addr}: closed")
@@ -217,7 +217,7 @@ async def handle_db_rollback(method: str, db: Database) -> tuple:
     return response
 
 
-############################  ppi path handlers
+############################  pii path handlers
 
 def validate_query(query: dict) -> tuple:
     """
@@ -405,7 +405,7 @@ def main():
         loop.close()
     print("Finished")
 
-
+# static HTTP responses
 RESPONSE_200 = compose_response(200)  # OK
 RESPONSE_400 = compose_response(400)  # Bad Request
 RESPONSE_404 = compose_response(404)  # Not Found
