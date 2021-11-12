@@ -5,7 +5,6 @@ import signal
 import json
 import urllib.parse
 import traceback
-from collections import OrderedDict
 from database import Database
 import constants as const
 import utils
@@ -95,7 +94,7 @@ async def handle_connection(conn_sock, addr, context: Context) -> None:
                     rate_limit_buckets[addr[0]] = tokens - 1
                 else:
                     # Too many requests
-                    await loop.sock_sendall(conn_sock, RESPONSE_429)  # Too many requests sent
+                    await loop.sock_sendall(conn_sock, utils.RESPONSE_429)  # Too many requests sent
                     return
                 # get first line
                 lines = request.split("\n")
@@ -103,15 +102,15 @@ async def handle_connection(conn_sock, addr, context: Context) -> None:
                 # basic checks
                 if method not in {"GET", "PUT", "PATCH", "DELETE"}:
                     # Bad Request
-                    await loop.sock_sendall(conn_sock, RESPONSE_400)
+                    await loop.sock_sendall(conn_sock, utils.RESPONSE_400)
                     break  # close connection
                 if version == "HTTP/1.0":
                     # HTTP Version not supported
-                    await loop.sock_sendall(conn_sock, RESPONSE_505)
+                    await loop.sock_sendall(conn_sock, utils.RESPONSE_505)
                     break  # close connection
                 if "content-length:" in request.lower():
                     # Bad Request, content in requests is not supported
-                    await loop.sock_sendall(conn_sock, RESPONSE_400)
+                    await loop.sock_sendall(conn_sock, utils.RESPONSE_400)
                     break  # close connection
                 # check and switch to RW db if needed
                 if method != "GET" and current_db is context.db_ro:
@@ -136,19 +135,6 @@ async def handle_connection(conn_sock, addr, context: Context) -> None:
         await context.db_rw_pool.put(current_db)
     conn_sock.close()
     print(f"handle_connection {addr}: closed")
-
-
-def compose_response(status: int, json: str = '') -> bytes:
-    content = json.encode("utf-8")
-    length = len(content)
-    header = f'HTTP/1.1 {status}\n'
-    header += 'Connection: keep-alive\n'
-    if json:
-        header += 'Content-Type: application/json; charset=utf-8\n'
-        header += 'Cache-control: no-cache, no-store, must-revalidate\n'
-    header += f'Content-Length: {length}\n\n'
-    response = header.encode("utf-8") + content
-    return response
 
 
 async def process_request(method: str, req_path: str, db: Database) -> tuple:
@@ -176,18 +162,18 @@ async def process_request(method: str, req_path: str, db: Database) -> tuple:
         elif path == "/pii/delete":
             return await handle_pii_delete(method, query, db)
         else:
-            response = RESPONSE_404, False  # Not Found
+            response = utils.RESPONSE_404, False  # Not Found
     except Exception as ex:
         result_json = json.dumps({"Error": str(ex)}, indent=4)
-        response = compose_response(500, result_json + '\n'), False
+        response = utils.compose_response(500, result_json + '\n'), False
     return response
 
 
 async def handle_ping(method: str, query: dict) -> tuple:
     if method != "GET":
-        return RESPONSE_400, False  # Bad Request
+        return utils.RESPONSE_400, False  # Bad Request
     await asyncio.sleep(1)
-    response = RESPONSE_200, True  # OK
+    response = utils.RESPONSE_200, True  # OK
     return response
 
 
@@ -195,25 +181,25 @@ async def handle_ping(method: str, query: dict) -> tuple:
 
 async def handle_db_begin(method: str, db: Database) -> tuple:
     if method != "PUT":
-        return RESPONSE_400, False  # Bad Request
+        return utils.RESPONSE_400, False  # Bad Request
     await db.execute("BEGIN")
-    response = RESPONSE_200, True  # OK
+    response = utils.RESPONSE_200, True  # OK
     return response
 
 
 async def handle_db_commit(method: str, db: Database) -> tuple:
     if method != "PUT":
-        return RESPONSE_400, False  # Bad Request
+        return utils.RESPONSE_400, False  # Bad Request
     await db.execute("COMMIT")
-    response = RESPONSE_200, True  # OK
+    response = utils.RESPONSE_200, True  # OK
     return response
 
 
 async def handle_db_rollback(method: str, db: Database) -> tuple:
     if method != "PUT":
-        return RESPONSE_400, False  # Bad Request
+        return utils.RESPONSE_400, False  # Bad Request
     await db.execute("ROLLBACK")
-    response = RESPONSE_200, True  # OK
+    response = utils.RESPONSE_200, True  # OK
     return response
 
 
@@ -228,41 +214,28 @@ def validate_query(query: dict) -> tuple:
     if "SSN" in query_keys:
         if not utils.is_SSN(query["SSN"]):
             result_json = json.dumps({"Error": "Invalid SSN'"})
-            return compose_response(400, result_json + '\n'), False  # Err
+            return utils.compose_response(400, result_json + '\n'), False  # Err
         query['SSN'] = utils.encode_SSN(query['SSN'])
     # validate DOB
     if "DOB" in query_keys and not utils.is_date(query["DOB"]):
         result_json = json.dumps({"Error": f"Invalid DOB: '{query['DOB']}'"})
-        return compose_response(400, result_json + '\n'), False  # Err
+        return utils.compose_response(400, result_json + '\n'), False  # Err
     # validate field set in query
     if not set(query_keys).issubset(set(const.DB_PII_TABLE_FIELDS)):
         diff_set = set(const.DB_PII_TABLE_FIELDS) - set(query_keys)
         result_json = json.dumps({"Error": f"Unknown fields {diff_set}." +
                                            f"Allowed: {const.DB_PII_TABLE_FIELDS}"}, indent=4)
-        return compose_response(400, result_json + '\n'), False  # Err
+        return utils.compose_response(400, result_json + '\n'), False  # Err
     return ()
-
-
-def normalize_result(result: list) -> list:
-    """
-    :return: list of dictionaries
-    """
-    new_result = []
-    for i, rec in enumerate(result):
-        new_rec = OrderedDict()
-        for k, v in zip(const.DB_PII_TABLE_FIELDS, rec):
-            new_rec[k] = v
-        new_result.append(new_rec)
-    return new_result
 
 
 async def handle_pii_search(method: str, query: dict, db: Database) -> tuple:
     if method != "GET":
-        return RESPONSE_400, False  # Bad Request
+        return utils.RESPONSE_400, False  # Bad Request
     # validate query fields & vals
-    response_tuple = validate_query(query)
-    if response_tuple:
-        return response_tuple
+    reponse_tuple = validate_query(query)
+    if reponse_tuple:
+        return reponse_tuple
     # compose sql stmt
     query_keys = set(query.keys())
     where_clause = ' AND '.join([f"{k} = :{k}" for k in query_keys])
@@ -273,19 +246,19 @@ async def handle_pii_search(method: str, query: dict, db: Database) -> tuple:
     WHERE {where_clause};         
     """
     result = await db.execute(sql, query)
-    new_result = normalize_result(result)
+    new_result = utils.normalize_db_result(result)
     result_json = json.dumps(new_result, indent=4)
-    response = compose_response(200, result_json + '\n'), True  # OK
+    response = utils.compose_response(200, result_json + '\n'), True  # OK
     return response
 
 
 async def handle_pii_insert(method: str, query: dict, db: Database) -> tuple:
     if method != "PUT":
-        return RESPONSE_400, False  # Bad Request
+        return utils.RESPONSE_400, False  # Bad Request
     # validate query fields & vals
-    response_tuple = validate_query(query)
-    if response_tuple:
-        return response_tuple
+    reponse_tuple = validate_query(query)
+    if reponse_tuple:
+        return reponse_tuple
     # compose sql stmt
     values = ":" + ", :".join(const.DB_PII_TABLE_FIELDS)
     fields = ", ".join(const.DB_PII_TABLE_FIELDS)
@@ -295,19 +268,19 @@ async def handle_pii_insert(method: str, query: dict, db: Database) -> tuple:
     RETURNING {fields};         
     """
     result = await db.execute(sql, query)
-    new_result = normalize_result(result)
+    new_result = utils.normalize_db_result(result)
     result_json = json.dumps(new_result, indent=4)
-    response = compose_response(200, result_json + '\n'), True  # OK
+    response = utils.compose_response(200, result_json + '\n'), True  # OK
     return response
 
 
 async def handle_pii_update(method: str, query: dict, db: Database) -> tuple:
     if method != "PATCH":
-        return RESPONSE_400, False  # Bad Request
+        return utils.RESPONSE_400, False  # Bad Request
     # validate query fields & vals
-    response_tuple = validate_query(query)
-    if response_tuple:
-        return response_tuple
+    reponse_tuple = validate_query(query)
+    if reponse_tuple:
+        return reponse_tuple
     # extract fields that need to be updated
     query_new = dict()
     query_old = dict()
@@ -321,13 +294,13 @@ async def handle_pii_update(method: str, query: dict, db: Database) -> tuple:
             query_old[k] = v
         else:
             result_json = json.dumps({"Error": f"Invalid value format: '{k}={v}'"})
-            return compose_response(400, result_json + '\n'), False  # Err
+            return utils.compose_response(400, result_json + '\n'), False  # Err
     # check that fields are matching rimary kay fields
     if not set(const.DB_PII_TABLE_PKEY).issubset(set(query.keys())):
         diff_set = set(const.DB_PII_TABLE_PKEY) - set(query.keys())
         result_json = json.dumps({"Error": f"Missing fields {diff_set}." +
                                            f"Required: {const.DB_PII_TABLE_PKEY}"}, indent=4)
-        return compose_response(400, result_json + '\n'), False  # Err
+        return utils.compose_response(400, result_json + '\n'), False  # Err
     # compose sql stmt
     fields = ", ".join(const.DB_PII_TABLE_FIELDS)
     where_clause = ' AND '.join([f"{k} = :{k}" for k in query_old.keys()])
@@ -339,25 +312,25 @@ async def handle_pii_update(method: str, query: dict, db: Database) -> tuple:
     RETURNING {fields};         
     """
     result = await db.execute(sql, {**query_old, **query_new})
-    new_result = normalize_result(result)
+    new_result = utils.normalize_db_result(result)
     result_json = json.dumps(new_result, indent=4)
-    response = compose_response(200, result_json + '\n'), True  # OK
+    response = utils.compose_response(200, result_json + '\n'), True  # OK
     return response
 
 
 async def handle_pii_delete(method: str, query: dict, db: Database) -> tuple:
     if method != "DELETE":
-        return RESPONSE_400, False  # Bad Request
+        return utils.RESPONSE_400, False  # Bad Request
     # validate query fields & vals
-    response_tuple = validate_query(query)
-    if response_tuple:
-        return response_tuple
+    reponse_tuple = validate_query(query)
+    if reponse_tuple:
+        return reponse_tuple
     # check that fields are matching rimary kay fields
     if not set(const.DB_PII_TABLE_PKEY).issubset(set(query.keys())):
         diff_set = set(const.DB_PII_TABLE_PKEY) - set(query.keys())
         result_json = json.dumps({"Error": f"Missing fields {diff_set}." +
                                            f"Required: {const.DB_PII_TABLE_PKEY}"}, indent=4)
-        return compose_response(400, result_json + '\n'), False  # Err
+        return utils.compose_response(400, result_json + '\n'), False  # Err
     # compose sql stmt
     query_keys = set(query.keys())
     where_clause = ' AND '.join([f"{k} = :{k}" for k in query_keys])
@@ -368,9 +341,9 @@ async def handle_pii_delete(method: str, query: dict, db: Database) -> tuple:
     RETURNING {fields};
     """
     result = await db.execute(sql, query)
-    new_result = normalize_result(result)
+    new_result = utils.normalize_db_result(result)
     result_json = json.dumps(new_result, indent=4)
-    response = compose_response(200, result_json + '\n'), True  # OK
+    response = utils.compose_response(200, result_json + '\n'), True  # OK
     return response
 
 
@@ -404,14 +377,6 @@ def main():
     finally:
         loop.close()
     print("Finished")
-
-# static HTTP responses
-RESPONSE_200 = compose_response(200)  # OK
-RESPONSE_400 = compose_response(400)  # Bad Request
-RESPONSE_404 = compose_response(404)  # Not Found
-RESPONSE_429 = compose_response(429)  # Too many requests sent
-RESPONSE_505 = compose_response(505)  # HTTP Version Not Supported
-RESPONSE_500 = compose_response(500)  # Internal Server Error
 
 if __name__ == "__main__":
     main()
