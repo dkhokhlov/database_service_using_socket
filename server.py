@@ -97,7 +97,6 @@ async def handle_connection(conn_sock, addr, context: Context) -> None:
                     await loop.sock_sendall(conn_sock, utils.RESPONSE_429)  # Too many requests sent
                     return
                 # check connections limit
-                print(len(asyncio.all_tasks(loop)))
                 if len(asyncio.all_tasks(loop)) - 2 > const.HTTP_CONNECT_MAX:
                     await loop.sock_sendall(conn_sock, utils.RESPONSE_503)  # Too many connections
                     return
@@ -113,7 +112,7 @@ async def handle_connection(conn_sock, addr, context: Context) -> None:
                     # HTTP Version not supported
                     await loop.sock_sendall(conn_sock, utils.RESPONSE_505)
                     break  # close connection
-                if "content-length:" in request.lower():
+                if "Content-Length:" in request and "Content-Length: 0" not in request:
                     # Bad Request, content in requests is not supported
                     await loop.sock_sendall(conn_sock, utils.RESPONSE_400)
                     break  # close connection
@@ -366,6 +365,7 @@ def shutdown():
     tasks = asyncio.all_tasks()
     print(f'Cancelling {len(tasks)} task(s).')
     [task.cancel() for task in tasks]
+    print(f'Active tasks: {len(asyncio.all_tasks())}')
 
 
 def main():

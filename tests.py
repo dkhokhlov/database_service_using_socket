@@ -1,6 +1,8 @@
 import traceback
 from http import client
 import constants
+import urllib
+import json
 
 
 def catch(func):
@@ -16,13 +18,13 @@ def catch(func):
 
 @catch
 def test(
-    name: str,
-    path: str,
-    method: str = "GET",
-    body: str = "",
-    expected_response=200,
-    expect_body: bool = False,
-    expect_fields: dict[str, str] = None,
+        name: str,
+        path: str,
+        method: str = "GET",
+        body: str = "",
+        expected_response=200,
+        expect_body: bool = False,
+        expect_fields: dict = None,
 ):
     print(f"Running Test {name}")
     c = client.HTTPConnection(constants.HOST, constants.PORT)
@@ -49,8 +51,10 @@ def test_ping():
 def test_single_insert():
     print("InsertTest")
     with open("data/pb.json", "r") as f:
-        json = f.read()
-        test("InsertTest", "/some/path", "SOMEMETHOD", body=json)
+        json_str = f.read()
+        query = json.loads(json_str)
+        query_enc = urllib.parse.urlencode(query)
+        test("InsertTest", path=f"/pii/insert?{query_enc}", method="PUT", expected_response=400, expect_body=True)
 
 
 def main():
@@ -58,7 +62,6 @@ def main():
         test_ping,
         test_single_insert,
     ]
-
     for test in tests:
         test()
 
