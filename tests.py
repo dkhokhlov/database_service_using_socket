@@ -156,13 +156,26 @@ def test_single_update_with_rollback():
         query_new["first_name_new"] = "Bill2"
         query_expected = query.copy()
         query_expected["first_name"] = "Bill2"
+        query_expected2 = query_expected.copy()
         query_url = urllib.parse.urlencode(query_expected)
+        # now reusing connection
+        c = client.HTTPConnection(constants.HOST, constants.PORT)  # need to reuse connection
         test("DeleteTest", path=f"/pii/delete?{query_url}", method="DELETE",
-             expected_response=200, expect_body=True)
+             expected_response=200, expect_body=True, connection=c)
+        time.sleep(0.5)
+        test("RollbackTest3", path=f"/db/begin", method="PUT",
+             expected_response=200, expect_body=False, expect_fields=None, connection=c)
         query_url = urllib.parse.urlencode(query_new)
-        test("UpdateTest", path=f"/pii/update?{query_url}", method="PATCH",
-             expected_response=200, expect_body=True, expect_fields=query_expected)
-
+        time.sleep(0.5)
+        test("RollbackTest4", path=f"/pii/update?{query_url}", method="PATCH",
+             expected_response=200, expect_body=True, expect_fields=query_expected, connection=c)
+        test("RollbackTest5", path=f"/db/rollback", method="PUT",
+             expected_response=200, expect_body=False, expect_fields=None, connection=c)
+        # now we run new session with update only - it should not see last update (no PKEY violation)
+        time.sleep(0.5)
+        query_url = urllib.parse.urlencode(query_expected2)
+        test("RollbackTest6", path=f"/pii/search?{query_url}", method="GET",
+             expected_response=200, expect_body=True, expect_fields=query_expected2)
 
 def main():
     tests = [
@@ -179,7 +192,8 @@ def main():
         test_delay,  # to avoid rate limiter
         test_single_rollback,
         test_delay,  # to avoid rate limiter
-#        test_single_update_with_rollback
+        test_single_insert,
+        test_single_update_with_rollback
     ]
     for test in tests:
         test()
