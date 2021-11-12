@@ -5,11 +5,10 @@ import signal
 import json
 import urllib.parse
 import traceback
-import hashlib
-import datetime as dt
 from collections import OrderedDict
 from database import Database
 import constants as const
+import utils
 
 APP_NAME = 'pii-service'
 __version__ = '1.0'
@@ -192,6 +191,8 @@ async def handle_ping(method: str, query: dict) -> tuple:
     return response
 
 
+############################  db path handlers
+
 async def handle_db_begin(method: str, db: Database) -> tuple:
     if method != "PUT":
         return RESPONSE_400, False  # Bad Request
@@ -216,81 +217,85 @@ async def handle_db_rollback(method: str, db: Database) -> tuple:
     return response
 
 
-def is_date(date_str: str) -> bool:
-    try:
-        t = dt.datetime.strptime(date_str, '"%m-%d-%Y')
-        return True
-    except ValueError:
-        return False
+############################  ppi path handlers
+
+def validate_query(query: dict) -> tuple:
+    """
+    :return: empty - means all valid
+    """
+    query_keys = set(query.keys())
+    # validate & encode SSN
+    if "SSN" in query_keys:
+        if not utils.is_SSN(query["SSN"]):
+            result_json = json.dumps({"Error": "Invalid SSN'"})
+            return compose_response(400, result_json + '\n'), False  # Err
+        query['SSN'] = utils.encode_SSN(query['SSN'])
+    # validate DOB
+    if "DOB" in query_keys and not utils.is_date(query["DOB"]):
+        result_json = json.dumps({"Error": f"Invalid DOB: '{query['DOB']}'"})
+        return compose_response(400, result_json + '\n'), False  # Err
+    # validate field set in query
+    if not set(query_keys).issubset(set(const.DB_PII_TABLE_FIELDS)):
+        diff_set = set(const.DB_PII_TABLE_FIELDS) - set(query_keys)
+        result_json = json.dumps({"Error": f"Unknown fields {diff_set}." +
+                                           f"Allowed: {const.DB_PII_TABLE_FIELDS}"}, indent=4)
+        return compose_response(400, result_json + '\n'), False  # Err
+    return ()
+
+
+def normalize_result(result: list) -> list:
+    """
+    :return: list of dictionaries
+    """
+    new_result = []
+    for i, rec in enumerate(result):
+        new_rec = OrderedDict()
+        for k, v in zip(const.DB_PII_TABLE_FIELDS, rec):
+            new_rec[k] = v
+        new_result.append(new_rec)
+    return new_result
 
 
 async def handle_pii_search(method: str, query: dict, db: Database) -> tuple:
     if method != "GET":
         return RESPONSE_400, False  # Bad Request
+    # validate query fields & vals
+    response_tuple = validate_query(query)
+    if response_tuple:
+        return response_tuple
     query_keys = set(query.keys())
-    # encode SSN
-    if "SSN" in query_keys:
-        query['SSN'] = encode_SSN(query['SSN'])
-    if "DOB" in query_keys and not is_date(query["DOB"]):
-        result_json = json.dumps({"Error": f"Invalid date '{query['DOB']}'"})
-        response = compose_response(400, result_json + '\n'), True  # Err
-        return response
-    fields = ", ".join(const.DB_PII_TABLE_FIELDS)
-    if not set(query_keys).issubset(set(const.DB_PII_TABLE_FIELDS)):
-        diff_set = set(const.DB_PII_TABLE_FIELDS) - set(query_keys)
-        result_json = json.dumps({"Error": f"Unknown fields {diff_set}." +
-                                           f"Allowed: {const.DB_PII_TABLE_FIELDS}"}, indent=4)
-        response = compose_response(400, result_json + '\n'), True  # Err
-        return response
-    values = ":" + ", :".join(query_keys)
     where_clause = ' AND '.join([f"{k} = :{k}" for k in query_keys])
+    fields = ", ".join(const.DB_PII_TABLE_FIELDS)
+    # compose sql stmt
     sql = f"""
     SELECT {fields}
     FROM pii_table
     WHERE {where_clause};         
     """
     result = await db.execute(sql, query)
-    new_result = []
-    for i, rec in enumerate(result):
-        new_rec = OrderedDict()
-        for k, v in zip(const.DB_PII_TABLE_FIELDS, rec):
-            new_rec[k] = v
-        new_result.append(new_rec)
+    new_result = normalize_result(result)
     result_json = json.dumps(new_result, indent=4)
     response = compose_response(200, result_json + '\n'), True  # OK
     return response
 
 
-def encode_SSN(ssn: str) -> str:
-    return hashlib.blake2b(ssn.encode('utf8'), salt=const.HMAC_SALT).hexdigest()
-
-
 async def handle_pii_insert(method: str, query: dict, db: Database) -> tuple:
     if method != "PUT":
         return RESPONSE_400, False  # Bad Request
-    query_keys = set(query.keys())
-    fields = ", ".join(const.DB_PII_TABLE_FIELDS)
-    if set(const.DB_PII_TABLE_FIELDS) != set(query_keys):
-        result_json = json.dumps({"Error": f"Invalid list of fields {query_keys}." +
-                                           f"Expected: {const.DB_PII_TABLE_FIELDS}"}, indent=4)
-        response = compose_response(400, result_json + '\n'), True  # OK
-        return response
+    # validate query fields & vals
+    response_tuple = validate_query(query)
+    if response_tuple:
+        return response_tuple
     values = ":" + ", :".join(const.DB_PII_TABLE_FIELDS)
+    fields = ", ".join(const.DB_PII_TABLE_FIELDS)
+    # compose sql stmt
     sql = f"""
     INSERT INTO  pii_table ({fields})
     VALUES ({values})
     RETURNING {fields};         
     """
-    # encode SSN
-    if "SSN" in query_keys:
-        query['SSN'] = encode_SSN(query['SSN'])
     result = await db.execute(sql, query)
-    new_result = []
-    for i, rec in enumerate(result):
-        new_rec = OrderedDict()
-        for k, v in zip(const.DB_PII_TABLE_FIELDS, rec):
-            new_rec[k] = v
-        new_result.append(new_rec)
+    new_result = normalize_result(result)
     result_json = json.dumps(new_result, indent=4)
     response = compose_response(200, result_json + '\n'), True  # OK
     return response
@@ -299,16 +304,49 @@ async def handle_pii_insert(method: str, query: dict, db: Database) -> tuple:
 async def handle_pii_update(method: str, query: dict, db: Database) -> tuple:
     if method != "PATCH":
         return RESPONSE_400, False  # Bad Request
-    response = RESPONSE_200, True  # OK
+    # validate query fields & vals
+    response_tuple = validate_query(query)
+    if response_tuple:
+        return response_tuple
+    values = ":" + ", :".join(const.DB_PII_TABLE_FIELDS)
+    fields = ", ".join(const.DB_PII_TABLE_FIELDS)
+    # compose sql stmt
+    sql = f"""
+    INSERT INTO  pii_table ({fields})
+    VALUES ({values})
+    RETURNING {fields};         
+    """
+    result = await db.execute(sql, query)
+    new_result = normalize_result(result)
+    result_json = json.dumps(new_result, indent=4)
+    response = compose_response(200, result_json + '\n'), True  # OK
     return response
 
 
 async def handle_pii_delete(method: str, query: dict, db: Database) -> tuple:
     if method != "DELETE":
         return RESPONSE_400, False  # Bad Request
-    response = RESPONSE_200, True  # OK
+    # validate query fields & vals
+    response_tuple = validate_query(query)
+    if response_tuple:
+        return response_tuple
+    query_keys = set(query.keys())
+    # compose sql stmt
+    where_clause = ' AND '.join([f"{k} = :{k}" for k in query_keys])
+    fields = ", ".join(const.DB_PII_TABLE_FIELDS)
+    sql = f"""
+    DELETE FROM pii_table
+    WHERE {where_clause}
+    RETURNING {fields};
+    """
+    result = await db.execute(sql, query)
+    new_result = normalize_result(result)
+    result_json = json.dumps(new_result, indent=4)
+    response = compose_response(200, result_json + '\n'), True  # OK
     return response
 
+
+#############################################  misc & main
 
 async def refill_rate_limit_buckets(buckets: dict, interval_sec: int, limit: int) -> None:
     while True:
