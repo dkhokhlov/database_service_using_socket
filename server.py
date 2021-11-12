@@ -156,7 +156,7 @@ async def process_request(method: str, req_path: str, db: Database) -> tuple:
     :return: tuple (bytes, bool) - (response, keep connection open)
     """
     url = urllib.parse.urlparse(req_path)
-    query = dict((k, v[0] if isinstance(v, list) else v) for k, v in urllib.parse.parse_qs(url.query).items())
+    query = dict((k, (v[0] if isinstance(v, list) and len(v) == 1 else v)) for k, v in urllib.parse.parse_qs(url.query).items())
     path = url.path
     try:
         if path == "/ping":
@@ -263,10 +263,10 @@ async def handle_pii_search(method: str, query: dict, db: Database) -> tuple:
     response_tuple = validate_query(query)
     if response_tuple:
         return response_tuple
+    # compose sql stmt
     query_keys = set(query.keys())
     where_clause = ' AND '.join([f"{k} = :{k}" for k in query_keys])
     fields = ", ".join(const.DB_PII_TABLE_FIELDS)
-    # compose sql stmt
     sql = f"""
     SELECT {fields}
     FROM pii_table
@@ -286,9 +286,9 @@ async def handle_pii_insert(method: str, query: dict, db: Database) -> tuple:
     response_tuple = validate_query(query)
     if response_tuple:
         return response_tuple
+    # compose sql stmt
     values = ":" + ", :".join(const.DB_PII_TABLE_FIELDS)
     fields = ", ".join(const.DB_PII_TABLE_FIELDS)
-    # compose sql stmt
     sql = f"""
     INSERT INTO  pii_table ({fields})
     VALUES ({values})
@@ -308,15 +308,37 @@ async def handle_pii_update(method: str, query: dict, db: Database) -> tuple:
     response_tuple = validate_query(query)
     if response_tuple:
         return response_tuple
-    values = ":" + ", :".join(const.DB_PII_TABLE_FIELDS)
-    fields = ", ".join(const.DB_PII_TABLE_FIELDS)
+    # extract fields that need to be updated
+    query_new = dict()
+    query_old = dict()
+    for k, v in query.items():
+        if isinstance(v, list) and len(v) == 1:
+            query_old[k] = v[0]
+        elif isinstance(v, list) and len(v) == 2:
+            query_old[k] = v[0]
+            query_new[k + '_new'] = v[1]
+        elif not isinstance(v, list):
+            query_old[k] = v
+        else:
+            result_json = json.dumps({"Error": f"Invalid value format: '{k}={v}'"})
+            return compose_response(400, result_json + '\n'), False  # Err
+    # check that fields are matching rimary kay fields
+    if not set(const.DB_PII_TABLE_PKEY).issubset(set(query.keys())):
+        diff_set = set(const.DB_PII_TABLE_PKEY) - set(query.keys())
+        result_json = json.dumps({"Error": f"Missing fields {diff_set}." +
+                                           f"Required: {const.DB_PII_TABLE_PKEY}"}, indent=4)
+        return compose_response(400, result_json + '\n'), False  # Err
     # compose sql stmt
+    fields = ", ".join(const.DB_PII_TABLE_FIELDS)
+    where_clause = ' AND '.join([f"{k} = :{k}" for k in query_old.keys()])
+    set_clause = ', '.join([f'{k[:-4]} = :{k}' for k in query_new.keys()])
     sql = f"""
-    INSERT INTO  pii_table ({fields})
-    VALUES ({values})
+    UPDATE pii_table
+    SET {set_clause}
+    WHERE {where_clause}
     RETURNING {fields};         
     """
-    result = await db.execute(sql, query)
+    result = await db.execute(sql, {**query_old, **query_new})
     new_result = normalize_result(result)
     result_json = json.dumps(new_result, indent=4)
     response = compose_response(200, result_json + '\n'), True  # OK
@@ -330,8 +352,14 @@ async def handle_pii_delete(method: str, query: dict, db: Database) -> tuple:
     response_tuple = validate_query(query)
     if response_tuple:
         return response_tuple
-    query_keys = set(query.keys())
+    # check that fields are matching rimary kay fields
+    if not set(const.DB_PII_TABLE_PKEY).issubset(set(query.keys())):
+        diff_set = set(const.DB_PII_TABLE_PKEY) - set(query.keys())
+        result_json = json.dumps({"Error": f"Missing fields {diff_set}." +
+                                           f"Required: {const.DB_PII_TABLE_PKEY}"}, indent=4)
+        return compose_response(400, result_json + '\n'), False  # Err
     # compose sql stmt
+    query_keys = set(query.keys())
     where_clause = ' AND '.join([f"{k} = :{k}" for k in query_keys])
     fields = ", ".join(const.DB_PII_TABLE_FIELDS)
     sql = f"""

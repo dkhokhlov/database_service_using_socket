@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS  pii_table(
 """
 
 DB_PII_TABLE_FIELDS = ["first_name", "last_name", "occupation", "SSN", "DOB"]
+DB_PII_TABLE_PKEY = ["first_name", "last_name", "occupation", "SSN", "DOB"]
 
 # Rate limiter
 RATE_LIMIT_SEC = 1
