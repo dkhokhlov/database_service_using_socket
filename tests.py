@@ -27,9 +27,13 @@ def test(
         expected_response=200,
         expect_body: bool = False,
         expect_fields: dict = None,
+        connection:client.HTTPConnection = None
 ):
     print(f"Running Test {name}")
-    c = client.HTTPConnection(constants.HOST, constants.PORT)
+    if not connection:
+        c = client.HTTPConnection(constants.HOST, constants.PORT)
+    else:
+        c = connection
     c.request(method, path, body=body)
     response = c.getresponse()
     response_body = response.read()
@@ -76,14 +80,19 @@ def test_single_delete():
 
 
 @catch
-def test_single_delete_no_expect():
-    print("DeleteTest")
+def test_single_delete_no_fields():
+    print("DeleteTest no fields")
     with open("data/pb.json", "r") as f:
         json_str = f.read()
         query = json.loads(json_str)
         query_url = urllib.parse.urlencode(query)
-        test("DeleteTest", path=f"/pii/delete?{query_url}", method="DELETE",
+        test("DeleteTest", path=f"/pii/delete?{query_url}", method="DELETE", expect_body=True,
              expected_response=200)
+
+
+@catch
+def test_delay():
+    time.sleep(0.5)
 
 
 @catch
@@ -99,7 +108,57 @@ def test_single_update():
         query_url = urllib.parse.urlencode(query_expected)
         test("DeleteTest", path=f"/pii/delete?{query_url}", method="DELETE",
              expected_response=200, expect_body=True)
-        time.sleep(1)
+        query_url = urllib.parse.urlencode(query_new)
+        test("UpdateTest", path=f"/pii/update?{query_url}", method="PATCH",
+             expected_response=200, expect_body=True, expect_fields=query_expected)
+
+
+@catch
+def test_single_search():
+    print("SearchTest")
+    with open("data/pb.json", "r") as f:
+        json_str = f.read()
+        query = json.loads(json_str)
+        query_url = urllib.parse.urlencode(query)
+        test("SearchTest", path=f"/pii/search?{query_url}", method="GET",
+             expected_response=200, expect_body=True, expect_fields=query)
+
+
+@catch
+def test_single_rollback():
+    print("RollbackTest")
+    with open("data/pb.json", "r") as f:
+        json_str = f.read()
+        query = json.loads(json_str)
+        query_url = urllib.parse.urlencode(query)
+        # nwihtout reusing connection - rollback must fail
+        test("RollbackTest1", path=f"/db/begin", method="PUT",
+             expected_response=200, expect_body=False, expect_fields=None)
+        test("RollbackTest2", path=f"/db/rollback", method="PUT",
+             expected_response=500, expect_body=True, expect_fields=None)
+        time.sleep(0.5)
+        # now reusing connection
+        c = client.HTTPConnection(constants.HOST, constants.PORT)
+        test("RollbackTest3", path=f"/db/begin", method="PUT",
+             expected_response=200, expect_body=False, expect_fields=None, connection=c)
+        time.sleep(0.5)
+        test("RollbackTest4", path=f"/db/rollback", method="PUT",
+             expected_response=200, expect_body=False, expect_fields=None, connection=c)
+
+
+@catch
+def test_single_update_with_rollback():
+    print("UpdateTest")
+    with open("data/pb.json", "r") as f:
+        json_str = f.read()
+        query = json.loads(json_str)
+        query_new = query.copy()
+        query_new["first_name_new"] = "Bill2"
+        query_expected = query.copy()
+        query_expected["first_name"] = "Bill2"
+        query_url = urllib.parse.urlencode(query_expected)
+        test("DeleteTest", path=f"/pii/delete?{query_url}", method="DELETE",
+             expected_response=200, expect_body=True)
         query_url = urllib.parse.urlencode(query_new)
         test("UpdateTest", path=f"/pii/update?{query_url}", method="PATCH",
              expected_response=200, expect_body=True, expect_fields=query_expected)
@@ -108,11 +167,19 @@ def test_single_update():
 def main():
     tests = [
         test_ping,
-        test_single_delete_no_expect,
+        test_single_delete_no_fields,
+        test_delay,
         test_single_insert,
         test_single_delete,
+        test_delay,  # to avoid rate limiter
         test_single_insert,
+        test_single_search,
+        test_delay,  # to avoid rate limiter
         test_single_update,
+        test_delay,  # to avoid rate limiter
+        test_single_rollback,
+        test_delay,  # to avoid rate limiter
+#        test_single_update_with_rollback
     ]
     for test in tests:
         test()
