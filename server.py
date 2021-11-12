@@ -2,6 +2,7 @@ import socket
 import argparse
 import asyncio
 import signal
+import json
 import urllib.parse
 import traceback
 from database import Database
@@ -24,7 +25,7 @@ class Context:
 
 
 async def serve(loop):
-    """
+    """ Service main
     """
     rate_limit_buckets = {}
     # start rate_limit_buckets periodic refills
@@ -40,11 +41,10 @@ async def serve(loop):
     # run DB DDL script
     db = await db_rw_pool.get()
     await db.executescript(const.DB_DDL_SQL)  # create table if missing etc
-    await db_rw_pool.put(db) # put db back to pool
+    await db_rw_pool.put(db)  # put db back to pool
     context = Context(loop, db_ro, db_rw_pool, rate_limit_buckets)
     # setup ipv4 TCP socket server
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         # enable TCP socket keep-alive
         s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
@@ -121,15 +121,18 @@ async def handle_connection(conn_sock, addr, context: Context) -> None:
                 await loop.sock_sendall(conn_sock, response)
                 if not keep_open:
                     break  # close connection
-            # connection is closed, do rollback if needed
+        except Exception:
+            print(traceback.format_exc())
+        finally:
+            conn_sock.shutdown(socket.SHUT_RDWR)
+            # connection is getting closed, do rollback if needed
             if not current_db is context.db_ro:
                 if await current_db.in_transaction():
                     await current_db.execute("ROLLBACK")
-        except Exception:
-            print(traceback.format_exc())
     # return rw db back to pull or just discard it if pool is big enough
     if not current_db is context.db_ro and context.db_rw_pool.qsize() < const.DB_RW_POOL_SIZE:
         await context.db_rw_pool.put(current_db)
+    conn_sock.close()
     print(f"handle_connection {addr}: closed")
 
 
@@ -153,24 +156,28 @@ async def process_request(method: str, req_path: str, db: Database) -> tuple:
     url = urllib.parse.urlparse(req_path)
     query = urllib.parse.parse_qs(url.query)
     path = url.path
-    if path == "/ping":
-        return await handle_ping(method, query)
-    elif path == "/db/begin":
-        return await handle_db_begin(method, db)
-    elif path == "/db/commit":
-        return await handle_db_commit(method, db)
-    elif path == "/db/rollback":
-        return await handle_db_rollback(method, db)
-    elif path == "/pii/search":
-        return await handle_pii_search(method, query, db)
-    elif path == "/pii/insert":
-        return await handle_pii_insert(method, query, db)
-    elif path == "/pii/update":
-        return await handle_pii_update(method, query, db)
-    elif path == "/pii/delete":
-        return await handle_pii_delete(method, query, db)
-    else:
-        response = RESPONSE_404, False  # Not Found
+    try:
+        if path == "/ping":
+            return await handle_ping(method, query)
+        elif path == "/db/begin":
+            return await handle_db_begin(method, db)
+        elif path == "/db/commit":
+            return await handle_db_commit(method, db)
+        elif path == "/db/rollback":
+            return await handle_db_rollback(method, db)
+        elif path == "/pii/search":
+            return await handle_pii_search(method, query, db)
+        elif path == "/pii/insert":
+            return await handle_pii_insert(method, query, db)
+        elif path == "/pii/update":
+            return await handle_pii_update(method, query, db)
+        elif path == "/pii/delete":
+            return await handle_pii_delete(method, query, db)
+        else:
+            response = RESPONSE_404, False  # Not Found
+    except Exception as ex:
+        resp_json = json.dumps({"Error" : str(ex)}, indent=4) + '\n'
+        response = compose_response(500, resp_json), False
     return response
 
 
@@ -269,6 +276,7 @@ RESPONSE_400 = compose_response(400)
 RESPONSE_404 = compose_response(404)
 RESPONSE_429 = compose_response(429)
 RESPONSE_505 = compose_response(505)
+RESPONSE_500 = compose_response(500)
 
 if __name__ == "__main__":
     main()

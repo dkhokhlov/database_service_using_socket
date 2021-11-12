@@ -9,14 +9,14 @@ class Database:
     def __init__(self, loop, uri: str):
         self.loop = loop
         self.executor = concurrent.futures.ProcessPoolExecutor(max_workers=1,
-                                                               initializer=self.connect_database,
+                                                               initializer=self._connect_database,
                                                                initargs=(uri,))
         # self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1,
-        #                                                       initializer=self.connect_database,
+        #                                                       initializer=self._connect_database,
         #                                                       initargs=(uri,))
 
     @staticmethod
-    def connect_database(uri) -> None:
+    def _connect_database(uri) -> None:
         db = sqlite3.connect(database=uri, uri=True, isolation_level=None)  # with autocommit
         db.executescript("PRAGMA journal_mode=WAL")  # better reads & writes concurrency
         current_thread = threading.current_thread()

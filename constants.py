@@ -24,10 +24,10 @@ CREATE TABLE IF NOT EXISTS  pii_table(
     first_name TEXT,
     last_name TEXT,
     occupation TEXT,
-    ssn TEXT,
-    dob DATE,
-    PRIMARY KEY(first_name, last_name, occupation, ssn, dob)
-)
+    SSN TEXT,
+    DOB DATE,
+    PRIMARY KEY(first_name, last_name, occupation, SSN, DOB)
+);
 """
 
 # Rate limiter
