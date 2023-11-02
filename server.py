@@ -98,7 +98,7 @@ async def handle_connection(conn_sock, addr, context: Context) -> None:
                 request = buffer[:end_of_header]
                 buffer = buffer[end_of_header + 2:]
                 print(f"Request: \n{request}\n\n")
-                # reta limiter
+                # rate limiter
                 tokens = rate_limit_buckets.get(addr[0], const.RATE_LIMIT_NUM)
                 if tokens > 0:
                     rate_limit_buckets[addr[0]] = tokens - 1
